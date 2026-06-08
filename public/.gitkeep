@@ -1,0 +1,1 @@
+# keep the public/ directory in git (Docker COPYs it; runtime writes storage/ here)
