@@ -14,21 +14,20 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const status = url.searchParams.get("status");
 
-    let query = db
+    // Filter by status in SQL (before LIMIT) so the latest 100 of that status
+    // are returned — not just the statuses that happen to be in the latest 100.
+    const where = status
+      ? and(eq(renderJobs.projectId, user.projectId), eq(renderJobs.status, status))
+      : eq(renderJobs.projectId, user.projectId);
+
+    const results = await db
       .select()
       .from(renderJobs)
-      .where(eq(renderJobs.projectId, user.projectId))
+      .where(where)
       .orderBy(desc(renderJobs.createdAt))
       .limit(100);
 
-    const results = await query;
-
-    // Filter by status if provided
-    const filtered = status
-      ? results.filter((r) => r.status === status)
-      : results;
-
-    return NextResponse.json(filtered);
+    return NextResponse.json(results);
   } catch (error) {
     console.error("Error fetching renders:", error);
     return NextResponse.json(

@@ -1,12 +1,10 @@
 import { NextResponse } from "next/server";
-import { db } from "@/db";
-import { templates, renderJobs } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
 import { authenticateApiKey } from "@/lib/api-auth";
-import { generateId } from "@/lib/utils";
-import { processBatch } from "@/lib/render/process-job";
 import { withCors, handleOptions } from "@/lib/cors";
 import { batchRequestSchema } from "@/lib/validation";
+import { createBatchJobs } from "@/lib/render/create-job";
+import { processBatch } from "@/lib/render/process-job";
+import { isUrlSafe } from "@/lib/ssrf";
 
 export async function OPTIONS() {
   return handleOptions();
@@ -17,10 +15,7 @@ export async function POST(request: Request) {
     const auth = await authenticateApiKey(request);
     if (auth instanceof NextResponse) return withCors(auth);
 
-    const rawBody = await request.json();
-
-    // Validate input
-    const parsed = batchRequestSchema.safeParse(rawBody);
+    const parsed = batchRequestSchema.safeParse(await request.json());
     if (!parsed.success) {
       return withCors(
         NextResponse.json(
@@ -38,66 +33,43 @@ export async function POST(request: Request) {
 
     const { template_id, items, format, quality, scale } = parsed.data;
 
-    // Find template
-    const [template] = await db
-      .select()
-      .from(templates)
-      .where(
-        and(
-          eq(templates.templateId, template_id),
-          eq(templates.projectId, auth.projectId),
-          eq(templates.isDeleted, false)
-        )
-      )
-      .limit(1);
+    // SSRF guard for per-item webhooks.
+    for (const item of items) {
+      if (item.webhook_url && !(await isUrlSafe(item.webhook_url))) {
+        return withCors(
+          NextResponse.json(
+            { error: "webhook_url must be a public http(s) URL" },
+            { status: 400 }
+          )
+        );
+      }
+    }
 
-    if (!template) {
+    const created = await createBatchJobs({
+      projectId: auth.projectId,
+      templateId: template_id,
+      items,
+      output: { format, quality, scale },
+    });
+    if (!created) {
       return withCors(
         NextResponse.json({ error: "Template not found" }, { status: 404 })
       );
     }
 
-    const outputDefaults = (template.outputDefaults as any) || {};
-    const resolvedFormat = format || outputDefaults.format || "png";
-    const resolvedQuality = quality || outputDefaults.quality || 90;
-    const resolvedScale = Math.min(scale || outputDefaults.scale || 1, 3);
-
-    const batchUid = generateId("batch");
-    const uids: string[] = [];
-
-    const jobValues = items.map((item) => {
-      const uid = generateId("img");
-      uids.push(uid);
-      return {
-        uid,
-        batchUid,
-        templateId: template.id,
-        projectId: auth.projectId,
-        status: "queued" as const,
-        modifications: item.modifications || [],
-        format: resolvedFormat,
-        quality: resolvedQuality,
-        scale: resolvedScale,
-        webhookUrl: item.webhook_url || null,
-      };
-    });
-
-    await db.insert(renderJobs).values(jobValues);
-
-    // Process the batch in the background; clients poll each uid.
-    void processBatch(uids);
+    void processBatch(created.uids);
 
     return withCors(
       NextResponse.json(
         {
-          batch_uid: batchUid,
-          uids,
-          count: items.length,
+          batch_uid: created.batchUid,
+          uids: created.uids,
+          count: created.uids.length,
           status: "queued",
-          template_id: template.templateId,
-          format: resolvedFormat,
-          quality: resolvedQuality,
-          scale: resolvedScale,
+          template_id,
+          format: created.resolved.format,
+          quality: created.resolved.quality,
+          scale: created.resolved.scale,
         },
         { status: 202 }
       )

@@ -38,6 +38,7 @@ import {
   Filter,
   Eye,
   FileImage,
+  Trash2,
 } from "lucide-react";
 import { cn, formatRelativeTime, formatDuration, copyToClipboard } from "@/lib/utils";
 
@@ -96,6 +97,27 @@ export default function RendersPage() {
       toast.error("Failed to retry render");
     },
   });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(`/api/renders/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["renders"] });
+      toast.success("Render deleted");
+    },
+    onError: () => {
+      toast.error("Failed to delete render");
+    },
+  });
+
+  const confirmDelete = (id: string) => {
+    if (window.confirm("Delete this render? This can't be undone.")) {
+      deleteMutation.mutate(id);
+    }
+  };
 
   const filteredRenders = renders?.filter((r: any) =>
     r.uid?.toLowerCase().includes(search.toLowerCase()) ||
@@ -268,6 +290,22 @@ export default function RendersPage() {
                         <RefreshCw className="h-4 w-4" />
                       </Button>
                     )}
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="Delete render"
+                      className="text-muted-foreground hover:text-destructive"
+                      disabled={
+                        deleteMutation.isPending &&
+                        deleteMutation.variables === render.id
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        confirmDelete(render.id);
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -398,6 +436,23 @@ export default function RendersPage() {
                     Retry
                   </Button>
                 )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto text-destructive hover:text-destructive"
+                  onClick={() => {
+                    const id = selectedRender.id;
+                    if (
+                      window.confirm("Delete this render? This can't be undone.")
+                    ) {
+                      deleteMutation.mutate(id);
+                      setSelectedRender(null);
+                    }
+                  }}
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                  Delete
+                </Button>
               </div>
             </div>
           )}

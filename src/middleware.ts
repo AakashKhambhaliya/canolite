@@ -4,10 +4,10 @@ import type { NextRequest } from "next/server";
 // Public routes that don't require authentication
 const PUBLIC_ROUTES = [
   "/login",
-  "/register",
+  "/setup",
   "/api/auth/login",
-  "/api/auth/register",
   "/api/auth/logout",
+  "/api/auth/setup",
   "/api/v1/", // Public API uses API key auth, not session
   "/api/placeholder",
 ];
@@ -20,11 +20,15 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Allow static assets and Next.js internals
+  // Allow Next.js internals and genuine static asset files (by extension).
+  // Note: a broad `pathname.includes(".")` would let any dotted path skip the
+  // auth gate, so we match a known static-asset extension allowlist instead.
   if (
     pathname.startsWith("/_next") ||
-    pathname.startsWith("/favicon") ||
-    pathname.includes(".")
+    pathname === "/favicon.ico" ||
+    /\.(?:ico|png|jpg|jpeg|gif|webp|svg|css|js|map|txt|woff2?|ttf|otf)$/.test(
+      pathname
+    )
   ) {
     return NextResponse.next();
   }

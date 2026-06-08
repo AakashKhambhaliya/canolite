@@ -37,6 +37,7 @@ coverage/
 # Misc
 *.tsbuildinfo
 
-# Local self-contained data (PGlite DB, rendered images, uploads)
-.pglite/
+# Local self-contained data (PGlite DB + backups, rendered images, uploads)
+.pglite
+.pglite.*
 public/storage/

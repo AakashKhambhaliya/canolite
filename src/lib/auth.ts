@@ -2,6 +2,23 @@ import { cookies } from "next/headers";
 import { db } from "@/db";
 import { sessions, users, projects } from "@/db/schema";
 import { eq, and, gt } from "drizzle-orm";
+import { generateToken } from "@/lib/utils";
+
+/**
+ * Create a 30-day session for a user and set the session cookie.
+ */
+export async function createSession(userId: string): Promise<void> {
+  const sessionToken = generateToken(48);
+  const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  await db.insert(sessions).values({ sessionToken, userId, expires });
+  cookies().set("session_token", sessionToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    expires,
+    path: "/",
+  });
+}
 
 export interface AuthUser {
   id: string;
@@ -17,41 +34,29 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
 
     if (!token) return null;
 
-    // Validate session
-    const [session] = await db
-      .select()
+    // Validate the session and load the user + project in one query.
+    const [row] = await db
+      .select({
+        userId: users.id,
+        name: users.name,
+        email: users.email,
+        projectId: projects.id,
+      })
       .from(sessions)
+      .innerJoin(users, eq(users.id, sessions.userId))
+      .leftJoin(projects, eq(projects.userId, users.id))
       .where(
-        and(
-          eq(sessions.sessionToken, token),
-          gt(sessions.expires, new Date())
-        )
+        and(eq(sessions.sessionToken, token), gt(sessions.expires, new Date()))
       )
       .limit(1);
 
-    if (!session) return null;
-
-    // Get user
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, session.userId))
-      .limit(1);
-
-    if (!user) return null;
-
-    // Get first project
-    const [project] = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.userId, user.id))
-      .limit(1);
+    if (!row) return null;
 
     return {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      projectId: project?.id || "",
+      id: row.userId,
+      name: row.name,
+      email: row.email,
+      projectId: row.projectId || "",
     };
   } catch (error) {
     console.error("Auth error:", error);

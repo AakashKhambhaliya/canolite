@@ -1,13 +1,10 @@
 import { NextResponse } from "next/server";
-import { db } from "@/db";
-import { templates, renderJobs } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
 import { authenticateApiKey } from "@/lib/api-auth";
-import { generateId } from "@/lib/utils";
-import { applyModifications } from "@/lib/render/apply-modifications";
-import { processRenderJob } from "@/lib/render/process-job";
 import { withCors, handleOptions } from "@/lib/cors";
 import { renderRequestSchema } from "@/lib/validation";
+import { createRenderJob } from "@/lib/render/create-job";
+import { processRenderJob } from "@/lib/render/process-job";
+import { isUrlSafe } from "@/lib/ssrf";
 
 export async function OPTIONS() {
   return handleOptions();
@@ -18,10 +15,7 @@ export async function POST(request: Request) {
     const auth = await authenticateApiKey(request);
     if (auth instanceof NextResponse) return withCors(auth);
 
-    const rawBody = await request.json();
-
-    // Validate input
-    const parsed = renderRequestSchema.safeParse(rawBody);
+    const parsed = renderRequestSchema.safeParse(await request.json());
     if (!parsed.success) {
       return withCors(
         NextResponse.json(
@@ -37,69 +31,46 @@ export async function POST(request: Request) {
       );
     }
 
-    const { template_id, modifications, format, quality, scale } = parsed.data;
+    const { template_id, modifications, format, quality, scale, webhook_url } =
+      parsed.data;
 
-    // Find template
-    const [template] = await db
-      .select()
-      .from(templates)
-      .where(
-        and(
-          eq(templates.templateId, template_id),
-          eq(templates.projectId, auth.projectId),
-          eq(templates.isDeleted, false)
+    // SSRF guard: reject per-request webhooks that target non-public hosts.
+    if (webhook_url && !(await isUrlSafe(webhook_url))) {
+      return withCors(
+        NextResponse.json(
+          { error: "webhook_url must be a public http(s) URL" },
+          { status: 400 }
         )
-      )
-      .limit(1);
+      );
+    }
 
-    if (!template) {
+    const created = await createRenderJob({
+      projectId: auth.projectId,
+      templateId: template_id,
+      modifications,
+      output: { format, quality, scale },
+      webhookUrl: webhook_url,
+    });
+    if (!created) {
       return withCors(
         NextResponse.json({ error: "Template not found" }, { status: 404 })
       );
     }
 
-    // Resolve output settings (API → template defaults → system defaults)
-    const outputDefaults = (template.outputDefaults as any) || {};
-    const resolvedFormat = format || outputDefaults.format || "png";
-    const resolvedQuality = quality || outputDefaults.quality || 90;
-    const resolvedScale = Math.min(scale || outputDefaults.scale || 1, 3);
-
-    // Validate + apply modifications
-    const { warnings } = applyModifications(
-      template.designJson,
-      modifications || []
-    );
-
-    // Create render job
-    const uid = generateId("img");
-    const [job] = await db
-      .insert(renderJobs)
-      .values({
-        uid,
-        templateId: template.id,
-        projectId: auth.projectId,
-        status: "queued",
-        modifications: modifications || [],
-        format: resolvedFormat,
-        quality: resolvedQuality,
-        scale: resolvedScale,
-      })
-      .returning();
-
-    // Process the render in the background; clients poll GET /v1/images/:uid.
-    void processRenderJob(job.uid);
+    // Process in the background; clients poll GET /v1/images/:uid.
+    void processRenderJob(created.job.uid);
 
     return withCors(
       NextResponse.json(
         {
-          uid: job.uid,
+          uid: created.job.uid,
           status: "queued",
-          template_id: template.templateId,
-          format: resolvedFormat,
-          quality: resolvedQuality,
-          scale: resolvedScale,
-          warnings: warnings.length > 0 ? warnings : undefined,
-          created_at: job.createdAt,
+          template_id,
+          format: created.resolved.format,
+          quality: created.resolved.quality,
+          scale: created.resolved.scale,
+          warnings: created.warnings.length ? created.warnings : undefined,
+          created_at: created.job.createdAt,
         },
         { status: 202 }
       )

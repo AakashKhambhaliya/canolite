@@ -1,67 +1,49 @@
 import { NextResponse } from "next/server";
-import { db } from "@/db";
-import { users, sessions } from "@/db/schema";
-import { eq } from "drizzle-orm";
-import bcrypt from "bcryptjs";
-import { cookies } from "next/headers";
-import { generateToken } from "@/lib/utils";
+import { createSession } from "@/lib/auth";
+import { getAdminUser, verifyPassword } from "@/lib/admin";
 
+/**
+ * Single-admin sign in.
+ *
+ * Credentials are stored on the admin user row (set during first-run setup or
+ * via the ADMIN_EMAIL/ADMIN_PASSWORD env vars). If setup hasn't run yet, the
+ * client is told to redirect to the setup wizard.
+ */
 export async function POST(request: Request) {
   try {
     const { email, password } = await request.json();
 
-    if (!email || !password) {
+    if (!email || typeof email !== "string") {
+      return NextResponse.json({ error: "Email is required" }, { status: 400 });
+    }
+    if (!password || typeof password !== "string") {
       return NextResponse.json(
-        { error: "Email and password are required" },
+        { error: "Password is required" },
         { status: 400 }
       );
     }
 
-    // Find user
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.email, email.toLowerCase().trim()))
-      .limit(1);
+    const admin = await getAdminUser();
+    if (!admin || !admin.passwordHash) {
+      // Not configured yet — point the client at the setup wizard.
+      return NextResponse.json({ error: "setup_required" }, { status: 409 });
+    }
 
-    if (!user || !user.passwordHash) {
+    const emailOk =
+      email.trim().toLowerCase() === (admin.email || "").toLowerCase();
+    const passwordOk = await verifyPassword(password, admin.passwordHash);
+    if (!emailOk || !passwordOk) {
       return NextResponse.json(
         { error: "Invalid email or password" },
         { status: 401 }
       );
     }
 
-    const isValid = await bcrypt.compare(password, user.passwordHash);
-    if (!isValid) {
-      return NextResponse.json(
-        { error: "Invalid email or password" },
-        { status: 401 }
-      );
-    }
-
-    // Create session
-    const sessionToken = generateToken(48);
-    const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
-
-    await db.insert(sessions).values({
-      sessionToken,
-      userId: user.id,
-      expires,
-    });
-
-    // Set cookie
-    const cookieStore = cookies();
-    cookieStore.set("session_token", sessionToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      expires,
-      path: "/",
-    });
+    await createSession(admin.id);
 
     return NextResponse.json({
-      message: "Login successful",
-      user: { id: user.id, name: user.name, email: user.email },
+      message: "Signed in",
+      user: { id: admin.id, name: admin.name, email: admin.email },
     });
   } catch (error) {
     console.error("Login error:", error);

@@ -1,6 +1,37 @@
 import * as schema from "./schema";
-import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
+import bcrypt from "bcryptjs";
+import { asc, eq } from "drizzle-orm";
+
+/**
+ * Optional headless setup: if ADMIN_EMAIL and ADMIN_PASSWORD are both set and
+ * the admin account isn't configured yet, provision it from the env vars so the
+ * first-run setup wizard is skipped (useful for Docker / CI deploys). Runs on
+ * every boot but is a no-op once the account is configured.
+ */
+export async function autoProvisionAdminFromEnv(db: any): Promise<void> {
+  const email = process.env.ADMIN_EMAIL;
+  const password = process.env.ADMIN_PASSWORD;
+  if (!email || !password) return;
+
+  const [admin] = await db
+    .select()
+    .from(schema.users)
+    .orderBy(asc(schema.users.createdAt))
+    .limit(1);
+  if (!admin || admin.passwordHash) return;
+
+  const passwordHash = await bcrypt.hash(password, 12);
+  await db
+    .update(schema.users)
+    .set({
+      email: email.trim().toLowerCase(),
+      passwordHash,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.users.id, admin.id));
+  console.log("✅ Admin auto-provisioned from ADMIN_EMAIL/ADMIN_PASSWORD");
+}
 
 /**
  * Seed demo data if the database is empty. Idempotent — checks for the demo
@@ -15,22 +46,23 @@ export async function seedIfEmpty(db: any): Promise<void> {
 
   console.log("🌱 Seeding database...");
 
-  const passwordHash = await bcrypt.hash("password123", 12);
+  // Single-admin model: bootstrap one admin user + project. Sign-in is gated by
+  // the ADMIN_PASSWORD env var, not this row's password.
   const [user] = await db
     .insert(schema.users)
     .values({
-      name: "Demo User",
-      email: "demo@canolite.local",
-      passwordHash,
+      name: "Admin",
+      email: "admin@localhost",
+      passwordHash: null,
     })
     .returning();
 
-  console.log("✅ Created demo user: demo@canolite.local / password123");
+  console.log("✅ Created admin user (configure it via the first-run setup wizard)");
 
   const [project] = await db
     .insert(schema.projects)
     .values({
-      name: "Demo Project",
+      name: "Default Project",
       userId: user.id,
     })
     .returning();
@@ -151,5 +183,5 @@ export async function seedIfEmpty(db: any): Promise<void> {
   ]);
 
   console.log(`✅ Seed complete. Sample template: ${templateId}`);
-  console.log("   Login: demo@canolite.local / password123");
+  console.log("   Open the app to create your admin account (setup wizard)");
 }

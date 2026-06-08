@@ -59,8 +59,9 @@ export async function ensureDb(): Promise<void> {
       const { migrate } = require("drizzle-orm/pglite/migrator");
       await migrate(db as any, { migrationsFolder: "./drizzle" });
     }
-    const { seedIfEmpty } = require("./seed-data");
+    const { seedIfEmpty, autoProvisionAdminFromEnv } = require("./seed-data");
     await seedIfEmpty(db);
+    await autoProvisionAdminFromEnv(db);
   })();
 
   return globalForDb.__canoliteReady;

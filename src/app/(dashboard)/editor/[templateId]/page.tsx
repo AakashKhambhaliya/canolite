@@ -5,6 +5,7 @@ import { useRouter, useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { cn, copyToClipboard } from "@/lib/utils";
+import { Logo } from "@/components/logo";
 import { installSnapping } from "@/lib/editor/snapping";
 import { ensureFont, registerCustomFont } from "@/lib/editor/font-loader";
 import { FontPicker, type CustomFont } from "@/components/editor/font-picker";
@@ -117,6 +118,9 @@ export default function EditorPage() {
   const [activeTool, setActiveTool] = useState<string>("select");
   const [canvasReady, setCanvasReady] = useState(false);
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
+  // Layer drag-and-drop reordering state.
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  const dragIndexRef = useRef<number | null>(null);
 
   // Force re-render helper
   const [, forceUpdate] = useState(0);
@@ -173,16 +177,44 @@ export default function EditorPage() {
     if (!canvas) return;
     const objects = canvas.getObjects();
     setLayers(
-      [...objects].reverse().map((obj: any, idx: number) => ({
-        id: obj.id || `layer-${idx}`,
-        name: obj.name || `Layer ${objects.length - idx}`,
-        type: obj.type,
-        visible: obj.visible !== false,
-        dynamic: obj.dynamic !== false && !!obj.name,
-        object: obj,
-      }))
+      [...objects].reverse().map((obj: any, idx: number) => {
+        // Ensure a stable id so React keys survive reordering (persisted on save).
+        if (!obj.id) {
+          obj.id = `obj_${Date.now().toString(36)}_${Math.random()
+            .toString(36)
+            .slice(2, 7)}`;
+        }
+        return {
+          id: obj.id,
+          name: obj.name || `Layer ${objects.length - idx}`,
+          type: obj.type,
+          visible: obj.visible !== false,
+          dynamic: obj.dynamic !== false && !!obj.name,
+          object: obj,
+        };
+      })
     );
   }, []);
+
+  // Reorder layers (panel order is top→bottom; Fabric stacking is bottom→top).
+  const reorderLayers = useCallback(
+    (from: number, to: number) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas || from == null || to == null || from === to) return;
+      const panel = [...layers];
+      if (from < 0 || from >= panel.length || to < 0 || to >= panel.length)
+        return;
+      const [moved] = panel.splice(from, 1);
+      panel.splice(to, 0, moved);
+      // Apply the new stacking: bottom→top is the panel reversed.
+      [...panel].reverse().forEach((l, i) => canvas.moveTo(l.object, i));
+      canvas.renderAll();
+      setSaved(false);
+      updateLayers();
+      rerender();
+    },
+    [layers, updateLayers]
+  );
 
   // Initialize Fabric canvas — once per mount, from the loaded template.
   useEffect(() => {
@@ -658,9 +690,7 @@ export default function EditorPage() {
             <TooltipContent>Back to Templates</TooltipContent>
           </Tooltip>
 
-          <div className="w-7 h-7 rounded-md bg-[#2f6fde] flex items-center justify-center text-white font-bold text-xs shrink-0">
-            C
-          </div>
+          <Logo size={28} className="rounded-md shrink-0" />
 
           <Separator
             orientation="vertical"
@@ -1242,13 +1272,42 @@ export default function EditorPage() {
                     </p>
                   ) : (
                     layers.map((layer, idx) => (
-                      <button
-                        key={`${layer.name}-${idx}`}
+                      <div
+                        key={layer.id}
+                        role="button"
+                        tabIndex={0}
+                        draggable
+                        onDragStart={(e) => {
+                          dragIndexRef.current = idx;
+                          e.dataTransfer.effectAllowed = "move";
+                          e.dataTransfer.setData("text/plain", String(idx));
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
+                          if (dragOverIdx !== idx) setDragOverIdx(idx);
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverIdx === idx) setDragOverIdx(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const from = dragIndexRef.current;
+                          if (from != null) reorderLayers(from, idx);
+                          dragIndexRef.current = null;
+                          setDragOverIdx(null);
+                        }}
+                        onDragEnd={() => {
+                          dragIndexRef.current = null;
+                          setDragOverIdx(null);
+                        }}
                         className={cn(
-                          "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors group",
+                          "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors group cursor-pointer",
                           activeObj === layer.object
                             ? "bg-[#2f6fde]/20"
-                            : "hover:bg-[#23262c]"
+                            : "hover:bg-[#23262c]",
+                          dragOverIdx === idx &&
+                            "ring-1 ring-[#2f6fde] ring-inset"
                         )}
                         onClick={() => {
                           const canvas = fabricCanvasRef.current;
@@ -1260,7 +1319,7 @@ export default function EditorPage() {
                           }
                         }}
                       >
-                        <GripVertical className="h-3 w-3 text-[#8b919c] opacity-0 group-hover:opacity-100" />
+                        <GripVertical className="h-3 w-3 text-[#8b919c] opacity-40 group-hover:opacity-100 cursor-grab active:cursor-grabbing shrink-0" />
 
                         <div
                           className={cn(
@@ -1294,7 +1353,9 @@ export default function EditorPage() {
                         </span>
 
                         <button
-                          className="opacity-0 group-hover:opacity-100 text-[#8b919c] hover:text-[#e6e8ec]"
+                          type="button"
+                          draggable={false}
+                          className="opacity-0 group-hover:opacity-100 text-[#8b919c] hover:text-[#e6e8ec] shrink-0"
                           onClick={(e) => {
                             e.stopPropagation();
                             const canvas = fabricCanvasRef.current;
@@ -1314,7 +1375,7 @@ export default function EditorPage() {
                             <EyeOff className="h-3.5 w-3.5" />
                           )}
                         </button>
-                      </button>
+                      </div>
                     ))
                   )}
                 </div>

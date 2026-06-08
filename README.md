@@ -8,55 +8,88 @@
 
 ## Features
 
-- 🎨 **Visual Template Editor** — Fabric.js-based drag-and-drop editor with text, images, shapes, and layer management
-- 🔗 **REST API** — Bannerbear-compatible API for single and batch image generation
+- 🎨 **Visual Template Editor** — Fabric.js drag-and-drop editor with text, images, shapes, **layer reordering**, **alignment/snapping guides**, **all Google Fonts + custom font upload**
+- 🔗 **REST API** — Bannerbear-style API for single and batch image generation
 - 📊 **Bulk CSV Import** — Upload a spreadsheet to generate hundreds of images at once
 - 🔑 **API Key Management** — Create/revoke keys with secure hashing (shown once)
 - 🎯 **Playground** — Interactive template testing with live API request preview
 - 📄 **Auto-generated API Docs** — Per-template documentation with copy-paste code examples
 - 🪝 **Webhooks** — Get notified when renders complete or fail
-- 📈 **Render Logs** — Track every render with status, duration, and retry support
-- 🐳 **Self-hosted** — Docker Compose with PostgreSQL, Redis, and MinIO
+- 📈 **Render Logs** — Track, retry, and delete renders
+- 🔒 **Single-admin auth** — One-time setup wizard, no public sign-up
+- ⚡ **Runs without Docker** — Self-contained on plain Node (in-process DB + local storage), or scale out with Postgres/Redis/MinIO
 
 ---
 
 ## Quick Start
 
-### One-command install (requires Docker)
-
-```bash
-curl -sSL https://raw.githubusercontent.com/your-org/canolite/main/install.sh | bash
-```
-
-### Manual setup
+**Requirements:** Node.js 18+ (no Docker needed for the default setup).
 
 ```bash
 # Clone
-git clone https://github.com/your-org/canolite.git
+git clone https://github.com/AakashKhambhaliya/canolite.git
 cd canolite
-
-# Start infrastructure
-docker compose up -d postgres redis minio
 
 # Install dependencies
 npm install
 
-# Set up environment
-cp .env.example .env
+# Install the headless browser used for rendering (~150 MB, one time)
+npx playwright install chromium
 
-# Run migrations
-npm run db:push
-
-# Seed demo data
-npm run db:seed
-
-# Start development server
+# Start the app
 npm run dev
 ```
 
-### Default credentials
-- **Email:** `demo@canolite.local`
-- **Password:** `password123`
+Open **http://localhost:3000** — on first launch you'll be guided through a
+one-time **setup wizard** to create your admin account.
+
+That's it. By default Canolite runs **fully self-contained** with no external
+services:
+
+- **Database** → in-process [PGlite](https://pglite.dev) (WASM Postgres), persisted to `./.pglite`
+- **Storage** → local filesystem under `public/storage`
+- **Rendering** → synchronous, in-process (headless Chromium + Sharp)
+
+Schema migration and demo data are applied automatically on first boot.
+
+### Optional: full stack (Postgres + Redis + MinIO)
+
+For production / horizontal scaling, point Canolite at real infrastructure via
+Docker Compose:
+
+```bash
+# Start infrastructure
+docker compose up -d postgres redis minio
+
+# Configure: set DATABASE_URL (postgres://…), and optionally REDIS_URL + S3_*
+cp .env.example .env
+
+# Create tables
+npm run db:push
+
+# Run the app (+ a queue worker if you use Redis/BullMQ)
+npm run dev
+npm run worker   # optional — only needed for the Redis/BullMQ render queue
+```
+
+When `DATABASE_URL` is a `postgres://…` URL, Canolite uses Postgres instead of
+PGlite. Storage falls back to local files unless S3 vars are set.
+
+### Signing in
+
+Canolite is a **single-admin, self-hosted** tool — there's no public sign-up.
+
+On first launch you create the admin account (email + password) in a **one-time
+setup wizard**. After that you sign in with those credentials, and can change
+the password anytime from **Settings** (it re-verifies your current password).
+
+**Headless / Docker:** set both env vars to auto-provision the admin on boot and
+skip the wizard:
+
+```bash
+ADMIN_EMAIL=you@yourdomain.com
+ADMIN_PASSWORD=your-strong-password
+```
 
 ---
 
@@ -66,15 +99,18 @@ npm run dev
 Browser (editor + dashboard)
         │
         ▼
-Next.js App  ──┬── Dashboard pages (editor, templates, keys, playground, logs)
-   (public)    └── API under /v1/* with API-key auth
-        │ enqueue
+Next.js App  ──┬── Dashboard pages (editor, templates, keys, playground, renders, settings)
+               └── API: /api/* (session auth) · /v1/* (API-key auth)
+        │
+        │  create render job → apply modifications →
+        │  render in headless Chromium (Fabric.js) → Sharp post-process → store
         ▼
-Redis + BullMQ ───────► Render Worker
-        │                     │  load template → apply mods →
-        │                     │  render → Sharp post-process → MinIO
-        ▼                     ▼
-   PostgreSQL            MinIO (S3-compatible)
+Render pipeline (synchronous, in-process)
+        │
+        ├── Database: PGlite (default) or PostgreSQL
+        └── Storage:  local filesystem (default) or S3 / MinIO
+
+Optional: Redis + BullMQ worker (npm run worker) for an out-of-process queue.
 ```
 
 ---
@@ -86,6 +122,8 @@ Redis + BullMQ ───────► Render Worker
 ```bash
 Authorization: Bearer sk_live_your_api_key
 ```
+
+Create keys in the dashboard under **API Keys**.
 
 ### Generate a single image
 
@@ -99,9 +137,19 @@ POST /v1/images
   ],
   "format": "png",
   "quality": 90,
-  "scale": 2
+  "scale": 2,
+  "webhook_url": "https://example.com/webhook"
 }
 ```
+
+Returns `202` with a `uid`; poll for the result:
+
+```bash
+GET /v1/images/:uid
+```
+
+> `image_url` and `webhook_url` must be **public** http(s) URLs — requests to
+> localhost / private IPs are rejected (SSRF protection).
 
 ### Batch generation
 
@@ -118,12 +166,6 @@ POST /v1/images/batch
 }
 ```
 
-### Check render status
-
-```bash
-GET /v1/images/:uid
-```
-
 ### List templates
 
 ```bash
@@ -137,32 +179,33 @@ GET /v1/templates/:template_id
 
 | Component | Technology |
 |-----------|-----------|
-| Framework | Next.js 14 (App Router, standalone output) |
+| Framework | Next.js 14 (App Router) |
 | Language | TypeScript 5.7 |
-| Editor | Fabric.js 5.3 |
-| Database | PostgreSQL 16 + Drizzle ORM |
-| Queue | Redis 7 + BullMQ |
-| Storage | MinIO (S3-compatible) |
+| Editor | Fabric.js 5.3 — snapping, layer reorder, Google Fonts, custom fonts |
+| Rendering | Headless Chromium (Playwright) + Sharp |
+| Database | In-process PGlite by default · PostgreSQL + Drizzle ORM |
+| Storage | Local filesystem by default · S3 / MinIO compatible |
+| Queue | Synchronous in-process by default · optional Redis + BullMQ |
 | UI | Tailwind CSS + shadcn/ui + Radix UI |
-| Auth | Custom session-based (bcrypt + secure cookies) |
+| Auth | Single-admin, session-based (bcrypt) |
 
 ---
 
 ## Environment Variables
 
+All variables are optional for the default self-contained setup.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | — | PostgreSQL connection string |
-| `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
+| `DATABASE_URL` | `pglite://.pglite` | Postgres connection string. Unset or `pglite://…` → in-process PGlite |
+| `ADMIN_EMAIL` | — | Optional: auto-provision admin email on boot (skips the setup wizard) |
+| `ADMIN_PASSWORD` | — | Optional: auto-provision admin password on boot (skips the setup wizard) |
 | `AUTH_SECRET` | — | Session signing secret |
-| `APP_URL` | `http://localhost:3000` | Public URL of the app |
-| `S3_ENDPOINT` | `http://localhost:9000` | MinIO/S3 endpoint |
-| `S3_BUCKET` | `canolite` | S3 bucket name |
-| `S3_ACCESS_KEY` | `minioadmin` | S3 access key |
-| `S3_SECRET_KEY` | `minioadmin` | S3 secret key |
-| `S3_FORCE_PATH_STYLE` | `true` | Force path-style URLs (MinIO) |
-| `RENDER_CONCURRENCY` | `3` | Max concurrent renders |
+| `APP_URL` | `http://localhost:3000` | Public URL of the app (used in stored image URLs) |
+| `RENDER_CONCURRENCY` | `3` | Max concurrent renders (BullMQ worker) |
 | `MAX_UPLOAD_MB` | `10` | Max upload file size |
+| `REDIS_URL` | `redis://localhost:6379` | Only for the optional BullMQ worker |
+| `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_REGION` / `S3_FORCE_PATH_STYLE` | — | Only for S3/MinIO storage (otherwise local filesystem) |
 
 ---
 

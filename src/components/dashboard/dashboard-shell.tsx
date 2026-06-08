@@ -33,6 +33,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { toast } from "sonner";
+import { Logo } from "@/components/logo";
 
 interface DashboardShellProps {
   children: React.ReactNode;
@@ -97,9 +98,7 @@ export function DashboardShell({ children, user }: DashboardShellProps) {
           {/* Logo */}
           <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200 dark:border-gray-800">
             <Link href="/" className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-sm shrink-0">
-                C
-              </div>
+              <Logo size={32} className="shrink-0 rounded-lg" />
               {!collapsed && (
                 <span className="text-lg font-bold tracking-tight truncate">
                   Canolite
@@ -231,9 +230,7 @@ export function DashboardShell({ children, user }: DashboardShellProps) {
               <Menu className="h-5 w-5" />
             </Button>
             <div className="flex items-center gap-2 ml-3">
-              <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-white font-bold text-xs">
-                C
-              </div>
+              <Logo size={28} className="rounded-lg" />
               <span className="font-bold">Canolite</span>
             </div>
           </div>

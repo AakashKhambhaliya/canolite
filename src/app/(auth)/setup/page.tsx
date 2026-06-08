@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,26 +14,30 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { toast } from "sonner";
-import { Loader2, Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { Loader2, Eye, EyeOff, Sparkles } from "lucide-react";
 import { Logo } from "@/components/logo";
 
-export default function LoginPage() {
+export default function SetupPage() {
   const router = useRouter();
+  const [checking, setChecking] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string>();
 
-  // First run? Send the operator to the setup wizard instead.
+  // If already configured, there's nothing to set up — go to login.
   useEffect(() => {
     let active = true;
     fetch("/api/auth/setup")
       .then((r) => r.json())
       .then((d) => {
-        if (active && !d.configured) router.replace("/setup");
+        if (!active) return;
+        if (d.configured) router.replace("/login");
+        else setChecking(false);
       })
-      .catch(() => {});
+      .catch(() => active && setChecking(false));
     return () => {
       active = false;
     };
@@ -41,39 +45,52 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) {
-      setError("Email and password are required");
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setError("Enter a valid email address");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters");
+      return;
+    }
+    if (password !== confirm) {
+      setError("Passwords do not match");
       return;
     }
 
     setIsLoading(true);
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await fetch("/api/auth/setup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (res.status === 409) {
-          router.replace("/setup");
+          router.replace("/login");
           return;
         }
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "Invalid email or password");
-        toast.error(data.error || "Invalid email or password");
+        setError(data.error || "Setup failed");
         return;
       }
-
-      toast.success("Welcome back!");
+      toast.success("Admin account created");
       router.push("/");
       router.refresh();
-    } catch (err) {
+    } catch {
       toast.error("Something went wrong. Please try again.");
     } finally {
       setIsLoading(false);
     }
   };
+
+  if (checking) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <Card className="border-0 shadow-xl bg-white dark:bg-gray-900">
@@ -83,11 +100,12 @@ export default function LoginPage() {
           <span className="text-lg font-bold">Canolite</span>
         </div>
         <CardTitle className="text-2xl font-bold flex items-center gap-2">
-          <ShieldCheck className="h-6 w-6 text-blue-600" />
-          Admin sign in
+          <Sparkles className="h-6 w-6 text-blue-600" />
+          Set up your admin account
         </CardTitle>
         <CardDescription>
-          Enter the admin password to access this Canolite instance.
+          Create the owner account for this Canolite instance. You can change
+          the password later from Settings.
         </CardDescription>
       </CardHeader>
       <form onSubmit={handleSubmit}>
@@ -97,30 +115,29 @@ export default function LoginPage() {
             <Input
               id="email"
               type="email"
-              placeholder="admin@example.com"
+              placeholder="you@example.com"
               value={email}
               onChange={(e) => {
                 setEmail(e.target.value);
                 if (error) setError(undefined);
               }}
-              className={error ? "border-destructive" : ""}
               disabled={isLoading}
               autoFocus
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="password">Admin password</Label>
+            <Label htmlFor="password">Password</Label>
             <div className="relative">
               <Input
                 id="password"
                 type={showPassword ? "text" : "password"}
-                placeholder="••••••••"
+                placeholder="At least 8 characters"
                 value={password}
                 onChange={(e) => {
                   setPassword(e.target.value);
                   if (error) setError(undefined);
                 }}
-                className={error ? "border-destructive pr-10" : "pr-10"}
+                className="pr-10"
                 disabled={isLoading}
               />
               <button
@@ -136,6 +153,20 @@ export default function LoginPage() {
                 )}
               </button>
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="confirm">Confirm password</Label>
+            <Input
+              id="confirm"
+              type={showPassword ? "text" : "password"}
+              placeholder="Re-enter password"
+              value={confirm}
+              onChange={(e) => {
+                setConfirm(e.target.value);
+                if (error) setError(undefined);
+              }}
+              disabled={isLoading}
+            />
             {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
         </CardContent>
@@ -147,11 +178,11 @@ export default function LoginPage() {
             disabled={isLoading}
           >
             {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Sign in
+            Create account & continue
           </Button>
           <p className="text-xs text-muted-foreground text-center leading-relaxed">
-            Single-admin, self-hosted — no public sign-up. Change your password
-            anytime from Settings.
+            This one-time setup runs only until an account exists. Single-admin,
+            self-hosted — no public sign-up.
           </p>
         </CardFooter>
       </form>
