@@ -15,14 +15,15 @@ services:
     # Or use a prebuilt image instead of `build: .`:
     # image: ghcr.io/aakashkhambhaliya/canolite:latest
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:3000"
     environment:
       # IMPORTANT: set this to the public URL of your instance so generated
       # image URLs resolve correctly.
       - APP_URL=${APP_URL:-http://localhost:3000}
       # Optional: auto-provision the admin instead of the setup wizard.
-      # - ADMIN_EMAIL=you@example.com
-      # - ADMIN_PASSWORD=change-me-please
+      # Leave empty to use the setup wizard.
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
     volumes:
       - canolite_data:/app/data # PGlite database
       - canolite_storage:/app/public/storage # rendered images + uploads

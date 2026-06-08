@@ -1,65 +1,118 @@
 #!/usr/bin/env bash
 # ============================================================
-# Canolite — One-command install script
+# Canolite — one-command installer
+#
+#   curl -fsSL https://raw.githubusercontent.com/AakashKhambhaliya/canolite/main/install.sh | bash
+#
+# Optional overrides (env vars):
+#   DOMAIN=canolite.example.com        # use https://DOMAIN as the public URL
+#   APP_URL=https://canolite.example.com
+#   PORT=3000                          # host port to expose (default 3000)
+#   CANOLITE_DIR=/opt/canolite         # install location (default ~/canolite)
+#   ADMIN_EMAIL=you@example.com        # auto-create admin (skip setup wizard)
+#   ADMIN_PASSWORD=change-me
 # ============================================================
 set -euo pipefail
 
+REPO_URL="https://github.com/AakashKhambhaliya/canolite.git"
+INSTALL_DIR="${CANOLITE_DIR:-$HOME/canolite}"
+PORT="${PORT:-3000}"
+
+green() { printf '\033[0;32m%s\033[0m\n' "$1"; }
+blue()  { printf '\033[0;34m%s\033[0m\n' "$1"; }
+yellow(){ printf '\033[0;33m%s\033[0m\n' "$1"; }
+red()   { printf '\033[0;31m%s\033[0m\n' "$1" >&2; }
+
 echo ""
-echo "  ╔══════════════════════════════════════╗"
-echo "  ║       Canolite — Self-hosted         ║"
-echo "  ║   Template-to-Image Platform         ║"
-echo "  ╚══════════════════════════════════════╝"
+blue "  ╔══════════════════════════════════════╗"
+blue "  ║   Canolite — self-hosted installer   ║"
+blue "  ╚══════════════════════════════════════╝"
 echo ""
 
-# Check prerequisites
-command -v docker >/dev/null 2>&1 || { echo "❌ Docker is required. Install: https://docs.docker.com/get-docker/"; exit 1; }
-command -v docker compose >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1 || { echo "❌ Docker Compose is required."; exit 1; }
+SUDO=""
+[ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo"
 
-# Generate secrets
-AUTH_SECRET=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
-S3_ACCESS_KEY="canolite$(openssl rand -hex 4 2>/dev/null || head -c 4 /dev/urandom | xxd -p)"
-S3_SECRET_KEY=$(openssl rand -base64 24 2>/dev/null || head -c 24 /dev/urandom | base64)
-
-# Ask for domain
-read -p "Enter your domain (or press Enter for localhost): " DOMAIN
-DOMAIN=${DOMAIN:-localhost}
-
-if [ "$DOMAIN" = "localhost" ]; then
-  APP_URL="http://localhost:3000"
-else
-  APP_URL="https://${DOMAIN}"
+# --- git ---
+if ! command -v git >/dev/null 2>&1; then
+  yellow "→ Installing git..."
+  if   command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update -y && $SUDO apt-get install -y git
+  elif command -v dnf     >/dev/null 2>&1; then $SUDO dnf install -y git
+  elif command -v yum     >/dev/null 2>&1; then $SUDO yum install -y git
+  elif command -v apk     >/dev/null 2>&1; then $SUDO apk add --no-cache git
+  else red "Please install git and re-run."; exit 1; fi
 fi
 
-# Write .env
-cat > .env << EOF
-AUTH_SECRET=${AUTH_SECRET}
-APP_URL=${APP_URL}
-S3_ACCESS_KEY=${S3_ACCESS_KEY}
-S3_SECRET_KEY=${S3_SECRET_KEY}
-RENDER_CONCURRENCY=3
-MAX_UPLOAD_MB=10
-EOF
+# --- docker ---
+if ! command -v docker >/dev/null 2>&1; then
+  yellow "→ Docker not found. Installing via get.docker.com..."
+  curl -fsSL https://get.docker.com | $SUDO sh
+  $SUDO systemctl enable --now docker 2>/dev/null || true
+fi
 
-echo "✅ Generated .env"
+# Pick a working docker invocation (handle group permissions right after install).
+DOCKER="docker"
+if ! docker info >/dev/null 2>&1; then
+  if [ -n "$SUDO" ] && $SUDO docker info >/dev/null 2>&1; then
+    DOCKER="$SUDO docker"
+  else
+    red "Cannot talk to the Docker daemon. Is it running?"; exit 1
+  fi
+fi
 
-# Start services
-echo "🚀 Starting Canolite..."
-docker compose up -d
+# Compose v2 plugin or legacy binary.
+if $DOCKER compose version >/dev/null 2>&1; then
+  COMPOSE="$DOCKER compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE="${SUDO:+$SUDO }docker-compose"
+else
+  red "Docker Compose not found. Install Docker Compose v2 and re-run."; exit 1
+fi
 
-# Wait for healthy
-echo "⏳ Waiting for services to be healthy..."
-sleep 10
+# --- source ---
+if [ -d "$INSTALL_DIR/.git" ]; then
+  blue "→ Updating existing install at $INSTALL_DIR"
+  git -C "$INSTALL_DIR" pull --ff-only || true
+else
+  blue "→ Cloning Canolite into $INSTALL_DIR"
+  git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+fi
+cd "$INSTALL_DIR"
 
-# Run migrations & seed
-echo "📦 Running database migrations..."
-docker compose exec -T app npx drizzle-kit push 2>/dev/null || echo "⚠️  Migrations may need manual run"
+# --- public URL ---
+if [ -z "${APP_URL:-}" ]; then
+  if [ -n "${DOMAIN:-}" ]; then
+    APP_URL="https://${DOMAIN}"
+  else
+    IP="$(curl -fsS https://api.ipify.org 2>/dev/null || curl -fsS https://ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
+    APP_URL="http://${IP:-localhost}:${PORT}"
+  fi
+fi
+
+# --- env for compose ---
+{
+  echo "APP_URL=${APP_URL}"
+  echo "PORT=${PORT}"
+  [ -n "${ADMIN_EMAIL:-}" ]    && echo "ADMIN_EMAIL=${ADMIN_EMAIL}"
+  [ -n "${ADMIN_PASSWORD:-}" ] && echo "ADMIN_PASSWORD=${ADMIN_PASSWORD}"
+} > .env
+green "→ Wrote .env (APP_URL=${APP_URL})"
+
+# --- build & run ---
+blue "→ Building and starting Canolite..."
+yellow "  (first build downloads Chromium — this can take a few minutes)"
+$COMPOSE up -d --build
 
 echo ""
-echo "  ✅ Canolite is running!"
+green "  ✅ Canolite is starting!"
 echo ""
-echo "  🌐 App:      ${APP_URL}"
-echo "  📧 Login:    demo@canolite.local"
-echo "  🔑 Password: password123"
+echo "     URL:    ${APP_URL}"
+echo "     Setup:  open the URL and create your admin account (one-time wizard)"
 echo ""
-echo "  Run 'docker compose logs -f' to see logs"
+echo "     Logs:   cd ${INSTALL_DIR} && ${COMPOSE} logs -f"
+echo "     Stop:   cd ${INSTALL_DIR} && ${COMPOSE} down"
+echo "     Update: curl -fsSL ${REPO_URL%.git}/raw/main/install.sh | bash"
 echo ""
+if [ -z "${DOMAIN:-}" ]; then
+  yellow "  Tip: put a reverse proxy (Caddy/Nginx) in front and re-run with"
+  yellow "       DOMAIN=your-domain.com for HTTPS."
+fi

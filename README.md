@@ -23,20 +23,35 @@
 
 ## Quick Start
 
-**Requirements:** Node.js 18+ (no Docker needed for the default setup).
+### 🚀 One-command install (VPS, with Docker)
+
+On a fresh VPS, run:
 
 ```bash
-# Clone
+curl -fsSL https://raw.githubusercontent.com/AakashKhambhaliya/canolite/main/install.sh | bash
+```
+
+This installs Docker if needed, fetches Canolite, and starts it. When it
+finishes it prints your URL — open it and complete the **setup wizard**.
+
+Point it at a domain (with HTTPS via your own reverse proxy) like so:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AakashKhambhaliya/canolite/main/install.sh | DOMAIN=canolite.example.com bash
+```
+
+Hosting on **Coolify**, **Dokploy**, or want manual Docker/VPS steps? See
+**[DEPLOY.md](./DEPLOY.md)**.
+
+### Local development
+
+**Requirements:** Node.js 18+ (no Docker needed).
+
+```bash
 git clone https://github.com/AakashKhambhaliya/canolite.git
 cd canolite
-
-# Install dependencies
 npm install
-
-# Install the headless browser used for rendering (~150 MB, one time)
-npx playwright install chromium
-
-# Start the app
+npx playwright install chromium   # headless browser for rendering (~150 MB, one time)
 npm run dev
 ```
 
