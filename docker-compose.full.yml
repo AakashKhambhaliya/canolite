@@ -9,6 +9,7 @@
 # ============================================================
 services:
   canolite:
+    image: ghcr.io/aakashkhambhaliya/canolite:latest
     build: .
     ports:
       - "3000:3000"

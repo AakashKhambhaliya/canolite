@@ -21,6 +21,32 @@ comfortable). The image is ~1 GB (includes Chromium). On first boot you'll see a
 
 ---
 
+## Prebuilt image (GHCR)
+
+A prebuilt `linux/amd64` image is published on every push to `main`:
+
+```
+ghcr.io/aakashkhambhaliya/canolite:latest
+```
+
+The compose files and the installer use it automatically (falling back to a
+source build on other architectures or if it's unavailable). Run it directly
+with plain Docker:
+
+```bash
+docker run -d --name canolite -p 3000:3000 \
+  -e APP_URL=https://canolite.example.com \
+  -v canolite_data:/app/data \
+  -v canolite_storage:/app/public/storage \
+  ghcr.io/aakashkhambhaliya/canolite:latest
+```
+
+> **One-time:** after the first GitHub Actions build, make the package **public**
+> (GitHub → Packages → `canolite` → Package settings → Change visibility →
+> Public) so it can be pulled without authentication.
+
+---
+
 ## Coolify
 
 1. **New Resource → Application.** Pick your Git repository (or *Public

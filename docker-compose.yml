@@ -11,9 +11,10 @@
 # ============================================================
 services:
   canolite:
+    # Pulls the prebuilt image if available; `build: .` is the fallback (used
+    # when you pass --build, or on architectures the image isn't published for).
+    image: ghcr.io/aakashkhambhaliya/canolite:latest
     build: .
-    # Or use a prebuilt image instead of `build: .`:
-    # image: ghcr.io/aakashkhambhaliya/canolite:latest
     ports:
       - "${PORT:-3000}:3000"
     environment:

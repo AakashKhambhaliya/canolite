@@ -97,10 +97,17 @@ fi
 } > .env
 green "→ Wrote .env (APP_URL=${APP_URL})"
 
-# --- build & run ---
-blue "→ Building and starting Canolite..."
-yellow "  (first build downloads Chromium — this can take a few minutes)"
-$COMPOSE up -d --build
+# --- run ---
+# Prefer the prebuilt image; fall back to building from source (e.g. on arm64
+# or if the image isn't published/public yet).
+blue "→ Fetching Canolite..."
+if $COMPOSE pull --quiet 2>/dev/null; then
+  green "  Using prebuilt image."
+  $COMPOSE up -d
+else
+  yellow "  Prebuilt image unavailable — building from source (downloads Chromium, a few minutes)..."
+  $COMPOSE up -d --build
+fi
 
 echo ""
 green "  ✅ Canolite is starting!"
