@@ -2,7 +2,7 @@
 
 **Self-hosted template-to-image generation platform.** Design templates in a visual editor, generate images via API. A self-hosted Bannerbear/Templated.io alternative.
 
-![Next.js](https://img.shields.io/badge/Next.js-14.2-black) ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue) ![Fabric.js](https://img.shields.io/badge/Fabric.js-5.3-orange) ![License](https://img.shields.io/badge/License-MIT-green)
+![Next.js](https://img.shields.io/badge/Next.js-15-black) ![React](https://img.shields.io/badge/React-19-blue) ![Fabric.js](https://img.shields.io/badge/Fabric.js-6-orange) ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
 
@@ -16,8 +16,10 @@
 - 📄 **Auto-generated API Docs** — Per-template documentation with copy-paste code examples
 - 🪝 **Webhooks** — Get notified when renders complete or fail
 - 📈 **Render Logs** — Track, retry, and delete renders
+- ⚙️ **Per-project defaults** — Default format/quality/scale + configurable **render retention** with automatic cleanup
 - 🔒 **Single-admin auth** — One-time setup wizard, no public sign-up
-- ⚡ **Runs without Docker** — Self-contained on plain Node (in-process DB + local storage), or scale out with Postgres/Redis/MinIO
+- 🔄 **Self-update checker** — One-click "check & install update" for git-based deployments
+- ⚡ **Runs without Docker** — Self-contained on plain Node (in-process DB + local storage), or point it at an external **PostgreSQL**
 
 ---
 
@@ -45,18 +47,19 @@ Hosting on **Coolify**, **Dokploy**, or want manual Docker/VPS steps? See
 
 ### Local development
 
-**Requirements:** Node.js 18+ (no Docker needed).
+**Requirements:** Node.js **20+** (Next.js 15). No Docker needed.
 
 ```bash
 git clone https://github.com/AakashKhambhaliya/canolite.git
 cd canolite
 npm install
 npx playwright install chromium   # headless browser for rendering (~150 MB, one time)
-npm run dev
+npm run dev                        # or: PORT=3001 npm run dev
 ```
 
 Open **http://localhost:3000** — on first launch you'll be guided through a
-one-time **setup wizard** to create your admin account.
+one-time **setup wizard** to create your admin account. (Image/asset URLs are
+relative, so it works on any port without setting `APP_URL`.)
 
 That's it. By default Canolite runs **fully self-contained** with no external
 services:
@@ -195,14 +198,13 @@ GET /v1/templates/:template_id
 
 | Component | Technology |
 |-----------|-----------|
-| Framework | Next.js 14 (App Router) |
-| Language | TypeScript 5.7 |
-| Editor | Fabric.js 5.3 — snapping, layer reorder, Google Fonts, custom fonts |
-| Rendering | Headless Chromium (Playwright) + Sharp |
+| Framework | Next.js 15 (App Router) · React 19 |
+| Language | TypeScript 5 |
+| Editor | Fabric.js 6 — snapping, layer reorder, Google Fonts, custom fonts |
+| Rendering | Synchronous & in-process — headless Chromium (Playwright) + Sharp |
 | Database | In-process PGlite by default · PostgreSQL + Drizzle ORM |
 | Storage | Local filesystem (persist with a volume) |
-| Rendering | Synchronous, in-process (headless Chromium + Sharp) |
-| UI | Tailwind CSS + shadcn/ui + Radix UI |
+| UI | Tailwind CSS 4 + shadcn/ui + Radix UI |
 | Auth | Single-admin, session-based (bcrypt) |
 
 ---
@@ -224,7 +226,7 @@ All variables are optional for the default self-contained setup.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APP_URL` | `http://localhost:3000` | **Public URL of the app** — used to build stored image URLs. Set this in production. |
+| `APP_URL` | `http://localhost:3000` | Public URL of the app. Image/asset URLs are now relative (resolve to the current origin), so this is only needed for **webhook payloads** to carry an absolute image URL. |
 | `DATABASE_URL` | `pglite://.pglite` | Unset or `pglite://…` → in-process PGlite. A `postgres://…` URL uses Postgres. |
 | `ADMIN_EMAIL` | — | Optional: auto-provision admin email on boot (skips the setup wizard) |
 | `ADMIN_PASSWORD` | — | Optional: auto-provision admin password on boot (skips the setup wizard) |
