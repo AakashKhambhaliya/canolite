@@ -10,7 +10,6 @@ import { promises as fs } from "fs";
 import path from "path";
 import sharp from "sharp";
 import type { Browser } from "playwright";
-import { appUrl } from "@/lib/storage";
 import googleFontsRaw from "@/lib/editor/google-fonts.json";
 
 interface GoogleFontMeta {
@@ -126,8 +125,9 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
 
   try {
     // <base> lets relative storage URLs (/storage/...) in the design and fonts
-    // resolve against the app's own origin inside the headless page.
-    const base = appUrl().replace(/\/$/, "");
+    // resolve inside the headless page. Point it at the app's own local listen
+    // address so it works on whatever port the server runs on (no APP_URL needed).
+    const base = `http://127.0.0.1:${process.env.PORT || "3000"}`;
     await page.setContent(
       `<!doctype html><html><head><meta charset="utf-8">
        <base href="${base}/">

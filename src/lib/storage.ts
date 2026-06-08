@@ -74,13 +74,34 @@ export function getFileUrl(key: string): string {
   return `/storage/${key}`;
 }
 
-/** Turn a relative storage URL into an absolute one (for API responses /
- *  webhooks / the server-side renderer, which need a full URL). */
+/** Turn a relative storage URL into an absolute one using APP_URL. Used where
+ *  there's no request context (e.g. webhook delivery to external systems). */
 export function toAbsoluteUrl(url: string | null | undefined): string {
   if (!url) return url || "";
   if (/^https?:\/\//i.test(url)) return url; // already absolute
   const base = appUrl().replace(/\/$/, "");
   return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
+/** Derive the request's origin dynamically (matches whatever host/proto the
+ *  client used, including behind a reverse proxy). Falls back to APP_URL. */
+export function requestBaseUrl(req: Request): string {
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
+  if (!host) return appUrl().replace(/\/$/, "");
+  const proto =
+    req.headers.get("x-forwarded-proto") ||
+    (/^(localhost|127\.|0\.0\.0\.0|\[?::1)/.test(host) ? "http" : "https");
+  return `${proto}://${host}`;
+}
+
+/** Make a stored (relative) URL absolute against the request's own origin. */
+export function absoluteForRequest(
+  req: Request,
+  url: string | null | undefined
+): string {
+  if (!url) return url || "";
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${requestBaseUrl(req)}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
 export { BUCKET, appUrl };
