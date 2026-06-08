@@ -17,7 +17,13 @@ function appUrl(): string {
 }
 
 function pathForKey(key: string): string {
-  return path.join(STORAGE_ROOT, key);
+  // Prevent path traversal: the resolved path must stay within STORAGE_ROOT.
+  const root = path.resolve(STORAGE_ROOT);
+  const full = path.resolve(root, key);
+  if (full !== root && !full.startsWith(root + path.sep)) {
+    throw new Error("Invalid storage key");
+  }
+  return full;
 }
 
 export async function ensureBucket(): Promise<void> {

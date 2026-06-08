@@ -59,7 +59,11 @@ export async function POST(request: Request) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const key = `uploads/${user.projectId}/${generateId()}/${file.name}`;
+    // Sanitize the filename — never trust it for a filesystem path.
+    const base = (file.name || "file").split(/[/\\]/).pop() || "file";
+    let safeName = base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
+    if (!safeName || safeName === "." || safeName === "..") safeName = "file";
+    const key = `uploads/${user.projectId}/${generateId()}/${safeName}`;
 
     const url = await uploadFile(key, buffer, file.type);
 
