@@ -4,6 +4,7 @@ import { renderJobs } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { authenticateApiKey } from "@/lib/api-auth";
 import { withCors, handleOptions } from "@/lib/cors";
+import { toAbsoluteUrl } from "@/lib/storage";
 
 export async function OPTIONS() {
   return handleOptions();
@@ -48,7 +49,7 @@ export async function GET(
       NextResponse.json({
         uid: job.uid,
         status: job.status,
-        image_url: job.imageUrl,
+        image_url: toAbsoluteUrl(job.imageUrl),
         format: job.format,
         quality: job.quality,
         scale: job.scale,

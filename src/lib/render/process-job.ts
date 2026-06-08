@@ -12,7 +12,7 @@ import { renderJobs, templates, assets } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { applyModifications } from "./apply-modifications";
 import { renderToBuffer } from "./render-image";
-import { uploadFile } from "@/lib/storage";
+import { uploadFile, toAbsoluteUrl } from "@/lib/storage";
 
 export async function processRenderJob(
   uid: string,
@@ -90,7 +90,7 @@ export async function processRenderJob(
             uid: job.uid,
             batch_uid: job.batchUid,
             status: "done",
-            image_url: imageUrl,
+            image_url: toAbsoluteUrl(imageUrl),
             duration_ms: durationMs,
           }),
         });

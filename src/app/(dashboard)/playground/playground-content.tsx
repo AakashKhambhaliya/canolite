@@ -419,7 +419,11 @@ export function PlaygroundContent() {
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        copyToClipboard(generatedImage);
+                        // Image URLs are root-relative; make absolute for copy.
+                        const abs = generatedImage.startsWith("http")
+                          ? generatedImage
+                          : `${baseUrl}${generatedImage}`;
+                        copyToClipboard(abs);
                         toast.success("URL copied");
                       }}
                     >

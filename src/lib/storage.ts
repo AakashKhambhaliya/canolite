@@ -65,8 +65,22 @@ export async function deleteFile(key: string): Promise<void> {
   }
 }
 
+/**
+ * Stored files are referenced by a ROOT-RELATIVE URL (`/storage/<key>`) so they
+ * resolve against whatever host/port the app is actually served on — this avoids
+ * broken images when APP_URL is unset or doesn't match the running port.
+ */
 export function getFileUrl(key: string): string {
-  return `${appUrl()}/storage/${key}`;
+  return `/storage/${key}`;
 }
 
-export { BUCKET };
+/** Turn a relative storage URL into an absolute one (for API responses /
+ *  webhooks / the server-side renderer, which need a full URL). */
+export function toAbsoluteUrl(url: string | null | undefined): string {
+  if (!url) return url || "";
+  if (/^https?:\/\//i.test(url)) return url; // already absolute
+  const base = appUrl().replace(/\/$/, "");
+  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
+}
+
+export { BUCKET, appUrl };
