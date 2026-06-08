@@ -29,6 +29,7 @@ import {
   Sparkles,
   FileImage,
   Zap,
+  Download,
 } from "lucide-react";
 import { copyToClipboard } from "@/lib/utils";
 
@@ -44,6 +45,8 @@ export function PlaygroundContent() {
   const [quality, setQuality] = useState(90);
   const [scale, setScale] = useState(1);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [imageSize, setImageSize] = useState<number | null>(null);
+  const [baseUrl, setBaseUrl] = useState("");
 
   // Fetch templates
   const { data: templates } = useQuery({
@@ -55,20 +58,20 @@ export function PlaygroundContent() {
     },
   });
 
+  // Resolve selected templateId → internal UUID for API calls
+  const selectedUuid = templates?.find(
+    (t: any) => t.templateId === selectedTemplate
+  )?.id;
+
   // Fetch selected template fields
   const { data: templateData } = useQuery({
-    queryKey: ["template-fields", selectedTemplate],
+    queryKey: ["template-fields", selectedUuid],
     queryFn: async () => {
-      if (!selectedTemplate) return null;
-      const template = templates?.find(
-        (t: any) => t.templateId === selectedTemplate
-      );
-      if (!template) return null;
-      const res = await fetch(`/api/templates/${template.id}`);
+      const res = await fetch(`/api/templates/${selectedUuid}`);
       if (!res.ok) throw new Error("Failed to fetch template");
       return res.json();
     },
-    enabled: !!selectedTemplate && !!templates,
+    enabled: !!selectedUuid,
   });
 
   // Initialize modification fields when template changes
@@ -82,6 +85,11 @@ export function PlaygroundContent() {
     }
   }, [templateData]);
 
+  // Set baseUrl after mount to avoid SSR hydration mismatch
+  useEffect(() => {
+    setBaseUrl(window.location.origin);
+  }, []);
+
   // Generate mutation
   const generateMutation = useMutation({
     mutationFn: async () => {
@@ -93,6 +101,9 @@ export function PlaygroundContent() {
           );
           if (field?.type === "image") {
             return { name, image_url: value };
+          }
+          if (field?.type === "shape") {
+            return { name, fill: value };
           }
           return { name, text: value };
         });
@@ -115,7 +126,16 @@ export function PlaygroundContent() {
       return res.json();
     },
     onSuccess: (data) => {
-      setGeneratedImage(data.image_url || data.imageUrl);
+      const url = data.image_url || data.imageUrl;
+      setGeneratedImage(url);
+      setImageSize(null);
+      // Fetch actual file size
+      if (url) {
+        fetch(url)
+          .then((r) => r.blob())
+          .then((blob) => setImageSize(blob.size))
+          .catch(() => {});
+      }
       toast.success("Image generated!");
     },
     onError: (err: Error) => {
@@ -133,6 +153,7 @@ export function PlaygroundContent() {
           (f: any) => f.name === name
         );
         if (field?.type === "image") return { name, image_url: value };
+        if (field?.type === "shape") return { name, fill: value };
         return { name, text: value };
       }),
     format,
@@ -140,8 +161,6 @@ export function PlaygroundContent() {
     scale,
   };
 
-  const baseUrl =
-    typeof window !== "undefined" ? window.location.origin : "";
 
   const curlCommand = `curl -X POST ${baseUrl}/v1/images \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
@@ -215,20 +234,47 @@ export function PlaygroundContent() {
                         {field.type}
                       </Badge>
                     </Label>
-                    <Input
-                      value={modifications[field.name] || ""}
-                      onChange={(e) =>
-                        setModifications((prev) => ({
-                          ...prev,
-                          [field.name]: e.target.value,
-                        }))
-                      }
-                      placeholder={
-                        field.type === "image"
-                          ? "https://example.com/image.png"
-                          : field.defaultValue || "Enter value..."
-                      }
-                    />
+                    {field.type === "shape" ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="color"
+                          value={modifications[field.name] || field.defaultValue || "#000000"}
+                          onChange={(e) =>
+                            setModifications((prev) => ({
+                              ...prev,
+                              [field.name]: e.target.value,
+                            }))
+                          }
+                          className="w-10 h-9 rounded border border-input cursor-pointer bg-transparent p-0.5"
+                        />
+                        <Input
+                          value={modifications[field.name] || ""}
+                          onChange={(e) =>
+                            setModifications((prev) => ({
+                              ...prev,
+                              [field.name]: e.target.value,
+                            }))
+                          }
+                          placeholder={field.defaultValue || "#000000"}
+                          className="h-9 font-mono text-xs"
+                        />
+                      </div>
+                    ) : (
+                      <Input
+                        value={modifications[field.name] || ""}
+                        onChange={(e) =>
+                          setModifications((prev) => ({
+                            ...prev,
+                            [field.name]: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          field.type === "image"
+                            ? "https://example.com/image.png"
+                            : field.defaultValue || "Enter value..."
+                        }
+                      />
+                    )}
                   </div>
                 ))}
               </CardContent>
@@ -283,6 +329,37 @@ export function PlaygroundContent() {
                   </Select>
                 </div>
               </div>
+              {templateData && (
+                <p className="text-xs text-muted-foreground pt-3">
+                  Est. size:{" "}
+                  {(() => {
+                    const pixels = (templateData.width || 1080) * scale * (templateData.height || 1350) * scale;
+                    
+                    // Calculate complexity from layers
+                    let complexityScore = 1;
+                    if (templateData?.designJson?.objects) {
+                      templateData.designJson.objects.forEach((obj: any) => {
+                        if (obj.type === 'image') complexityScore += 1.5;
+                        else if (obj.type === 'i-text' || obj.type === 'textbox') complexityScore += 0.2;
+                        else complexityScore += 0.1;
+                      });
+                    }
+                    const multiplier = Math.min(Math.max(complexityScore, 1), 6);
+
+                    const baseBytesPerPx =
+                      format === "png" 
+                        ? 0.05 
+                        : format === "webp" 
+                          ? 0.005 + (quality / 100) * 0.01 
+                          : 0.002 + (quality / 100) * 0.015;
+
+                    const sizeBytes = Math.round(pixels * baseBytesPerPx * multiplier);
+                    return sizeBytes > 1024 * 1024
+                      ? `~${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+                      : `~${Math.round(sizeBytes / 1024)} KB`;
+                  })()}
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -328,25 +405,51 @@ export function PlaygroundContent() {
                 )}
               </div>
               {generatedImage && (
-                <div className="flex gap-2 mt-3">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      copyToClipboard(generatedImage);
-                      toast.success("URL copied");
-                    }}
-                  >
-                    <Copy className="mr-1.5 h-3.5 w-3.5" />
-                    Copy URL
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => window.open(generatedImage, "_blank")}
-                  >
-                    Open Full Size
-                  </Button>
+                <div className="mt-3 space-y-2">
+                  {imageSize !== null && (
+                    <p className="text-xs text-muted-foreground">
+                      Size:{" "}
+                      {imageSize > 1024 * 1024
+                        ? `${(imageSize / (1024 * 1024)).toFixed(2)} MB`
+                        : `${Math.round(imageSize / 1024)} KB`}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        copyToClipboard(generatedImage);
+                        toast.success("URL copied");
+                      }}
+                    >
+                      <Copy className="mr-1.5 h-3.5 w-3.5" />
+                      Copy URL
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={async () => {
+                        try {
+                          const res = await fetch(generatedImage);
+                          const blob = await res.blob();
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `generated.${format}`;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                          URL.revokeObjectURL(url);
+                        } catch {
+                          toast.error("Download failed");
+                        }
+                      }}
+                    >
+                      <Download className="mr-1.5 h-3.5 w-3.5" />
+                      Download
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>

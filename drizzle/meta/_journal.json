@@ -8,6 +8,20 @@
       "when": 1780861588842,
       "tag": "0000_funny_shadowcat",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1780923850486,
+      "tag": "0001_mighty_bastion",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780924837917,
+      "tag": "0002_glorious_jane_foster",
+      "breakpoints": true
     }
   ]
 }

@@ -11,13 +11,14 @@ export async function OPTIONS() {
 
 export async function GET(
   request: Request,
-  { params }: { params: { uid: string } }
+  { params }: { params: Promise<{ uid: string }> }
 ) {
   try {
+    const { uid } = await params;
     const auth = await authenticateApiKey(request);
     if (auth instanceof NextResponse) return withCors(auth);
 
-    if (!params.uid || params.uid.length < 4) {
+    if (!uid || uid.length < 4) {
       return withCors(
         NextResponse.json({ error: "Invalid uid" }, { status: 400 })
       );
@@ -28,7 +29,7 @@ export async function GET(
       .from(renderJobs)
       .where(
         and(
-          eq(renderJobs.uid, params.uid),
+          eq(renderJobs.uid, uid),
           eq(renderJobs.projectId, auth.projectId)
         )
       )

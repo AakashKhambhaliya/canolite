@@ -7,9 +7,10 @@ import { processRenderJob } from "@/lib/render/process-job";
 
 export async function POST(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -27,7 +28,7 @@ export async function POST(
       })
       .where(
         and(
-          eq(renderJobs.id, params.id),
+          eq(renderJobs.id, id),
           eq(renderJobs.projectId, user.projectId)
         )
       )

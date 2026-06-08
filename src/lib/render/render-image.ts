@@ -64,7 +64,7 @@ function buildFontHead(families: string[], customFonts: CustomFontRef[]): string
 let fabricSource: string | null = null;
 async function getFabricSource(): Promise<string> {
   if (fabricSource) return fabricSource;
-  const p = path.join(process.cwd(), "node_modules", "fabric", "dist", "fabric.min.js");
+  const p = path.join(process.cwd(), "node_modules", "fabric", "dist", "index.min.js");
   fabricSource = await fs.readFile(p, "utf8");
   return fabricSource;
 }
@@ -161,12 +161,8 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
           }
         } catch {}
 
-        await new Promise<void>((resolve) => {
-          canvas.loadFromJSON(designJson, () => {
-            canvas.renderAll();
-            resolve();
-          });
-        });
+        await canvas.loadFromJSON(designJson);
+        canvas.renderAll();
 
         canvas.renderAll();
         return canvas.toDataURL({ format: "png", multiplier: scale });

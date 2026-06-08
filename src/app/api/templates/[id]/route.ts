@@ -7,9 +7,10 @@ import { extractFields } from "@/lib/render/apply-modifications";
 
 export async function GET(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -20,7 +21,7 @@ export async function GET(
       .from(templates)
       .where(
         and(
-          eq(templates.id, params.id),
+          eq(templates.id, id),
           eq(templates.projectId, user.projectId),
           eq(templates.isDeleted, false)
         )
@@ -52,9 +53,10 @@ export async function GET(
 
 export async function PUT(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -75,7 +77,7 @@ export async function PUT(
       .set(updateData)
       .where(
         and(
-          eq(templates.id, params.id),
+          eq(templates.id, id),
           eq(templates.projectId, user.projectId),
           eq(templates.isDeleted, false)
         )
@@ -124,9 +126,10 @@ export async function PUT(
 
 export async function DELETE(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -137,7 +140,7 @@ export async function DELETE(
       .set({ isDeleted: true, updatedAt: new Date() })
       .where(
         and(
-          eq(templates.id, params.id),
+          eq(templates.id, id),
           eq(templates.projectId, user.projectId)
         )
       );

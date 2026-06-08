@@ -7,9 +7,10 @@ import { generateId } from "@/lib/utils";
 
 export async function POST(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -20,7 +21,7 @@ export async function POST(
       .from(templates)
       .where(
         and(
-          eq(templates.id, params.id),
+          eq(templates.id, id),
           eq(templates.projectId, user.projectId),
           eq(templates.isDeleted, false)
         )

@@ -1,13 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    instrumentationHook: true,
-    serverComponentsExternalPackages: [
-      "playwright",
-      "sharp",
-      "@electric-sql/pglite",
-    ],
-  },
+  serverExternalPackages: [
+    "playwright",
+    "sharp",
+    "@electric-sql/pglite",
+  ],
   images: {
     remotePatterns: [
       {

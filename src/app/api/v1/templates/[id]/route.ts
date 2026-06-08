@@ -11,13 +11,14 @@ export async function OPTIONS() {
 
 export async function GET(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const auth = await authenticateApiKey(request);
     if (auth instanceof NextResponse) return withCors(auth);
 
-    if (!params.id || params.id.length < 4) {
+    if (!id || id.length < 4) {
       return withCors(
         NextResponse.json(
           { error: "Invalid template ID" },
@@ -32,7 +33,7 @@ export async function GET(
       .from(templates)
       .where(
         and(
-          eq(templates.templateId, params.id),
+          eq(templates.templateId, id),
           eq(templates.projectId, auth.projectId),
           eq(templates.isDeleted, false)
         )

@@ -158,11 +158,12 @@ export function applyModifications(
       }
     }
 
+    const objType = (obj.type || "").toLowerCase();
     const isTextLayer =
-      obj.type === "textbox" ||
-      obj.type === "text" ||
-      obj.type === "i-text";
-    const isImageLayer = obj.type === "image";
+      objType === "textbox" ||
+      objType === "text" ||
+      objType === "i-text";
+    const isImageLayer = objType === "image";
 
     if (isTextLayer) {
       // Apply text content
@@ -264,16 +265,17 @@ export function extractFields(
     if (!objects) return;
     for (const obj of objects) {
       if (obj.name && obj.dynamic !== false) {
+        const t = (obj.type || "").toLowerCase();
         const isText =
-          obj.type === "textbox" ||
-          obj.type === "text" ||
-          obj.type === "i-text";
-        const isImage = obj.type === "image";
+          t === "textbox" ||
+          t === "text" ||
+          t === "i-text";
+        const isImage = t === "image";
 
         fields.push({
           name: obj.name,
           type: isText ? "text" : isImage ? "image" : "shape",
-          defaultValue: isText ? obj.text || "" : isImage ? obj.src || "" : "",
+          defaultValue: isText ? obj.text || "" : isImage ? obj.src || "" : obj.fill || "#000000",
           properties: {
             fontFamily: obj.fontFamily,
             fontSize: obj.fontSize,

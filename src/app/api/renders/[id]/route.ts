@@ -10,9 +10,10 @@ import { deleteFile } from "@/lib/storage";
  */
 export async function DELETE(
   _request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -23,7 +24,7 @@ export async function DELETE(
       .from(renderJobs)
       .where(
         and(
-          eq(renderJobs.id, params.id),
+          eq(renderJobs.id, id),
           eq(renderJobs.projectId, user.projectId)
         )
       )

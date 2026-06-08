@@ -1,0 +1,1 @@
+ALTER TABLE "projects" ADD COLUMN "retention_hours" integer DEFAULT 24;

@@ -11,7 +11,8 @@ export async function createSession(userId: string): Promise<void> {
   const sessionToken = generateToken(48);
   const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   await db.insert(sessions).values({ sessionToken, userId, expires });
-  cookies().set("session_token", sessionToken, {
+  const cookieStore = await cookies();
+  cookieStore.set("session_token", sessionToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
@@ -29,7 +30,7 @@ export interface AuthUser {
 
 export async function getCurrentUser(): Promise<AuthUser | null> {
   try {
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     const token = cookieStore.get("session_token")?.value;
 
     if (!token) return null;

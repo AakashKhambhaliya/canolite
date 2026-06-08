@@ -67,6 +67,10 @@ export const projects = pgTable("projects", {
     .notNull(),
   webhookUrl: text("webhook_url"),
   webhookSecret: text("webhook_secret"),
+  defaultFormat: varchar("default_format", { length: 10 }).default("png"),
+  defaultQuality: integer("default_quality").default(90),
+  defaultScale: integer("default_scale").default(1),
+  retentionHours: integer("retention_hours").default(24),
   createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
 });

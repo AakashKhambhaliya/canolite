@@ -15,6 +15,17 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -59,15 +70,17 @@ import {
   Triangle,
   Minus as LineIcon,
   MousePointer,
+  SlidersHorizontal,
+  Lock,
+  Unlock,
 } from "lucide-react";
 
 // We'll store the fabric module reference once loaded
-let fabricModule: any = null;
+let fabricModule: typeof import("fabric") | null = null;
 
 async function loadFabric() {
   if (fabricModule) return fabricModule;
-  const mod = await import("fabric");
-  fabricModule = mod.fabric || mod.default?.fabric || mod;
+  fabricModule = await import("fabric");
   return fabricModule;
 }
 
@@ -78,10 +91,11 @@ async function loadFabric() {
 function refreshTextFonts(canvas: any) {
   if (!canvas) return;
   try {
-    fabricModule?.util?.clearFabricFontCache?.();
+    const { cache } = fabricModule || {};
+    cache?.clearFontCache?.();
   } catch {}
   for (const o of canvas.getObjects()) {
-    if (/text|textbox|i-text/.test(o.type || "")) {
+    if (/text|textbox|i-text/i.test(o.type || "")) {
       if (typeof o.initDimensions === "function") o.initDimensions();
       o.dirty = true;
       o.setCoords?.();
@@ -101,6 +115,7 @@ export default function EditorPage() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   // True once the canvas has been initialized for the current mount. Prevents
   // background refetches / cache updates from re-initializing (and wiping) the
   // live canvas. Reset on unmount so each (re)open initializes cleanly.
@@ -118,6 +133,10 @@ export default function EditorPage() {
   const [activeTool, setActiveTool] = useState<string>("select");
   const [canvasReady, setCanvasReady] = useState(false);
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
+  // Per-template output defaults
+  const [outputFormat, setOutputFormat] = useState<string>("");
+  const [outputQuality, setOutputQuality] = useState<number | "">("" );
+  const [outputScale, setOutputScale] = useState<number | "">("" );
   // Layer drag-and-drop reordering state.
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const dragIndexRef = useRef<number | null>(null);
@@ -189,6 +208,7 @@ export default function EditorPage() {
           name: obj.name || `Layer ${objects.length - idx}`,
           type: obj.type,
           visible: obj.visible !== false,
+          locked: obj.selectable === false,
           dynamic: obj.dynamic !== false && !!obj.name,
           object: obj,
         };
@@ -234,7 +254,8 @@ export default function EditorPage() {
       const fabric = await loadFabric();
       if (disposed || !canvasRef.current) return;
 
-      const canvas = new fabric.Canvas(canvasRef.current, {
+      const { Canvas, FabricImage, util } = fabric;
+      const canvas = new Canvas(canvasRef.current, {
         width: template.width || 1080,
         height: template.height || 1350,
         backgroundColor:
@@ -246,29 +267,51 @@ export default function EditorPage() {
       localCanvas = canvas;
       fabricCanvasRef.current = canvas;
       setTemplateName(template.name || "Untitled");
+      // Load per-template output defaults
+      const od = template.outputDefaults as any;
+      if (od) {
+        setOutputFormat(od.format || "");
+        setOutputQuality(od.quality ?? "");
+        setOutputScale(od.scale ?? "");
+      }
 
       // Load existing design
       if (template.designJson?.objects?.length > 0) {
-        canvas.loadFromJSON(template.designJson, () => {
-          if (disposed) return;
+        await canvas.loadFromJSON(template.designJson);
+        if (!disposed) {
           canvas.renderAll();
           updateLayers();
           loadingRef.current = false;
           setSaved(true);
           setCanvasReady(true);
+          // Scroll workspace to center the canvas
+          requestAnimationFrame(() => {
+            const ws = workspaceRef.current;
+            if (ws) {
+              ws.scrollLeft = (ws.scrollWidth - ws.clientWidth) / 2;
+              ws.scrollTop = (ws.scrollHeight - ws.clientHeight) / 2;
+            }
+          });
           // Load any non-system fonts used in the design, then repaint so the
           // text renders with the correct typeface.
           const families = new Set<string>();
           for (const o of canvas.getObjects()) {
-            if (o.fontFamily) families.add(o.fontFamily);
+            if ((o as any).fontFamily) families.add((o as any).fontFamily);
           }
           families.forEach((f) =>
             ensureFont(f).then(() => !disposed && refreshTextFonts(canvas))
           );
-        });
+        }
       } else {
         loadingRef.current = false;
         setCanvasReady(true);
+        requestAnimationFrame(() => {
+          const ws = workspaceRef.current;
+          if (ws) {
+            ws.scrollLeft = (ws.scrollWidth - ws.clientWidth) / 2;
+            ws.scrollTop = (ws.scrollHeight - ws.clientHeight) / 2;
+          }
+        });
       }
 
       // Selection events
@@ -301,7 +344,7 @@ export default function EditorPage() {
       });
 
       // Corner / center / edge snapping with alignment guides.
-      cleanupSnap = installSnapping(canvas, fabric);
+      cleanupSnap = installSnapping(canvas);
     })();
 
     return () => {
@@ -324,7 +367,7 @@ export default function EditorPage() {
       }
       setCanvasReady(false);
     };
-  }, [template, updateLayers]);
+  }, [template?.id, updateLayers]);
 
   // Save handler
   const handleSave = useCallback(() => {
@@ -337,14 +380,14 @@ export default function EditorPage() {
     // loaded from saved JSON that has no styles key. Ensure it's a valid object.
     for (const o of canvas.getObjects() as any[]) {
       if (
-        /text|textbox|i-text/.test(o.type || "") &&
+        /text|textbox|i-text/i.test(o.type || "") &&
         (!o.styles || typeof o.styles !== "object")
       ) {
         o.styles = {};
       }
     }
 
-    const json = canvas.toJSON([
+    const json = canvas.toObject([
       "name",
       "dynamic",
       "id",
@@ -357,8 +400,13 @@ export default function EditorPage() {
       designJson: json,
       width: template?.width,
       height: template?.height,
+      outputDefaults: {
+        format: outputFormat || undefined,
+        quality: outputQuality !== "" ? Number(outputQuality) : undefined,
+        scale: outputScale !== "" ? Number(outputScale) : undefined,
+      },
     });
-  }, [templateName, template, saveMutation]);
+  }, [templateName, template, saveMutation, outputFormat, outputQuality, outputScale]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -386,10 +434,10 @@ export default function EditorPage() {
 
   // Tool actions — all use the already-loaded fabric module
   const addText = useCallback(async () => {
-    const fabric = await loadFabric();
+    const { Textbox } = await loadFabric();
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    const text = new fabric.Textbox("Edit this text", {
+    const text = new Textbox("Edit this text", {
       left: 100,
       top: 100,
       width: 300,
@@ -397,7 +445,7 @@ export default function EditorPage() {
       fontFamily: "Arial",
       fill: "#000000",
       name: "",
-      dynamic: true,
+      dynamic: false,
     });
     canvas.add(text);
     canvas.setActiveObject(text);
@@ -406,10 +454,10 @@ export default function EditorPage() {
   }, []);
 
   const addRect = useCallback(async () => {
-    const fabric = await loadFabric();
+    const { Rect } = await loadFabric();
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    const rect = new fabric.Rect({
+    const rect = new Rect({
       left: 100,
       top: 100,
       width: 200,
@@ -426,10 +474,10 @@ export default function EditorPage() {
   }, []);
 
   const addCircle = useCallback(async () => {
-    const fabric = await loadFabric();
+    const { Circle: FabricCircle } = await loadFabric();
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    const circle = new fabric.Circle({
+    const circle = new FabricCircle({
       left: 100,
       top: 100,
       radius: 80,
@@ -443,10 +491,10 @@ export default function EditorPage() {
   }, []);
 
   const addTriangle = useCallback(async () => {
-    const fabric = await loadFabric();
+    const { Triangle: FabricTriangle } = await loadFabric();
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    const triangle = new fabric.Triangle({
+    const triangle = new FabricTriangle({
       left: 100,
       top: 100,
       width: 150,
@@ -461,10 +509,10 @@ export default function EditorPage() {
   }, []);
 
   const addLine = useCallback(async () => {
-    const fabric = await loadFabric();
+    const { Line } = await loadFabric();
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    const line = new fabric.Line([50, 100, 300, 100], {
+    const line = new Line([50, 100, 300, 100], {
       stroke: "#000000",
       strokeWidth: 3,
       name: "",
@@ -484,27 +532,26 @@ export default function EditorPage() {
       const canvas = fabricCanvasRef.current;
       if (!file || !canvas) return;
 
-      const fabric = await loadFabric();
+      const { FabricImage } = await loadFabric();
       const reader = new FileReader();
-      reader.onload = (ev) => {
+      reader.onload = async (ev) => {
         const url = ev.target?.result as string;
-        fabric.Image.fromURL(url, (img: any) => {
-          // Scale to fit ~50% of canvas
-          const maxW = (template?.width || 1080) * 0.5;
-          const maxH = (template?.height || 1350) * 0.5;
-          const scale = Math.min(maxW / img.width, maxH / img.height, 1);
-          img.set({
-            left: 50,
-            top: 50,
-            scaleX: scale,
-            scaleY: scale,
-            name: "",
-            dynamic: true,
-          });
-          canvas.add(img);
-          canvas.setActiveObject(img);
-          canvas.renderAll();
+        const img = await FabricImage.fromURL(url);
+        // Scale to fit ~50% of canvas
+        const maxW = (template?.width || 1080) * 0.5;
+        const maxH = (template?.height || 1350) * 0.5;
+        const scale = Math.min(maxW / (img.width || 1), maxH / (img.height || 1), 1);
+        img.set({
+          left: 50,
+          top: 50,
+          scaleX: scale,
+          scaleY: scale,
+          name: "",
+          dynamic: false,
         });
+        canvas.add(img);
+        canvas.setActiveObject(img);
+        canvas.renderAll();
       };
       reader.readAsDataURL(file);
     };
@@ -512,21 +559,95 @@ export default function EditorPage() {
     setActiveTool("select");
   }, [template]);
 
-  const handleExport = useCallback(() => {
+  const replaceImage = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    const activeObj = canvas?.getActiveObject();
+    if (!canvas || !activeObj) return;
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/png,image/jpeg,image/webp,image/svg+xml";
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+
+      const { FabricImage } = await loadFabric();
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        const url = ev.target?.result as string;
+        const newImg = await FabricImage.fromURL(url);
+        // Preserve position, scale, name, dynamic flag
+        const props = {
+          left: activeObj.left,
+          top: activeObj.top,
+          scaleX: activeObj.scaleX,
+          scaleY: activeObj.scaleY,
+          angle: activeObj.angle,
+          name: (activeObj as any).name || "",
+          dynamic: (activeObj as any).dynamic ?? false,
+          opacity: activeObj.opacity,
+        };
+        // Scale new image to fit the same bounding box
+        const oldW = (activeObj.width || 1) * (activeObj.scaleX || 1);
+        const oldH = (activeObj.height || 1) * (activeObj.scaleY || 1);
+        const fitScale = Math.min(
+          oldW / (newImg.width || 1),
+          oldH / (newImg.height || 1)
+        );
+        newImg.set({
+          ...props,
+          scaleX: fitScale,
+          scaleY: fitScale,
+        });
+        canvas.remove(activeObj);
+        canvas.add(newImg);
+        canvas.setActiveObject(newImg);
+        canvas.renderAll();
+        setSelectedObject(newImg);
+        rerender();
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  }, [rerender]);
+
+  // Export dialog state
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<string>("png");
+  const [exportQuality, setExportQuality] = useState(100);
+  const [exportScale, setExportScale] = useState(2);
+
+  const doExport = useCallback(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
-    const dataURL = canvas.toDataURL({
-      format: "png",
-      quality: 1,
-      multiplier: 2,
-    });
-    const link = document.createElement("a");
-    link.download = `${templateName || "template"}.png`;
-    link.href = dataURL;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }, [templateName]);
+
+    if (exportFormat === "svg") {
+      const svg = canvas.toSVG();
+      const blob = new Blob([svg], { type: "image/svg+xml" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.download = `${templateName || "template"}.svg`;
+      link.href = url;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } else {
+      const dataURL = canvas.toDataURL({
+        format: exportFormat as any,
+        quality: exportQuality / 100,
+        multiplier: exportScale,
+      });
+      const link = document.createElement("a");
+      link.download = `${templateName || "template"}.${exportFormat === "jpeg" ? "jpg" : exportFormat}`;
+      link.href = dataURL;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+    setExportOpen(false);
+    toast.success(`Exported as ${exportFormat.toUpperCase()}`);
+  }, [templateName, exportFormat, exportQuality, exportScale]);
 
   // Update selected object property
   const updateProp = useCallback(
@@ -671,7 +792,7 @@ export default function EditorPage() {
   ];
 
   const activeObj = fabricCanvasRef.current?.getActiveObject();
-  const objType = activeObj?.type;
+  const objType = (activeObj?.type || "").toLowerCase();
   const isText =
     objType === "textbox" || objType === "text" || objType === "i-text";
   const isImage = objType === "image";
@@ -684,8 +805,32 @@ export default function EditorPage() {
     objType === "line";
 
   return (
+    <>
     <TooltipProvider delayDuration={0}>
-      <div className="flex flex-col h-screen bg-[#0f1115] text-[#e6e8ec] overflow-hidden">
+      <div
+        className="flex flex-col h-screen bg-[#0f1115] text-[#e6e8ec] overflow-hidden"
+        style={{
+          "--background": "220 20% 7%",
+          "--foreground": "220 10% 92%",
+          "--card": "220 20% 7%",
+          "--card-foreground": "220 10% 92%",
+          "--popover": "220 18% 10%",
+          "--popover-foreground": "220 10% 92%",
+          "--primary": "217 91% 59%",
+          "--primary-foreground": "220 10% 92%",
+          "--secondary": "220 15% 16%",
+          "--secondary-foreground": "220 10% 92%",
+          "--muted": "220 15% 16%",
+          "--muted-foreground": "220 10% 65%",
+          "--accent": "220 15% 16%",
+          "--accent-foreground": "220 10% 92%",
+          "--destructive": "0 63% 31%",
+          "--destructive-foreground": "220 10% 92%",
+          "--border": "220 15% 20%",
+          "--input": "220 15% 20%",
+          "--ring": "224 76% 48%",
+        } as React.CSSProperties}
+      >
         {/* ==================== TOP BAR ==================== */}
         <div className="h-12 bg-[#14171c] border-b border-white/[0.08] flex items-center px-3 gap-2 shrink-0">
           <Tooltip>
@@ -715,14 +860,19 @@ export default function EditorPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                className="text-[#c4c9d2] hover:text-[#e6e8ec] hover:bg-[#23262c] text-xs"
+                className="hover:bg-[#23262c] text-xs"
+                style={{ color: "#c4c9d2" }}
               >
                 File
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent className="bg-[#14171c] border-white/[0.1] text-[#e6e8ec]">
+            <DropdownMenuContent
+              className="border-white/[0.1]"
+              style={{ backgroundColor: "#14171c", color: "#e6e8ec" }}
+            >
               <DropdownMenuItem
                 className="text-xs focus:bg-[#23262c]"
+                style={{ color: "inherit" }}
                 onClick={() => {
                   copyToClipboard(template?.templateId || "");
                   toast.success("Template ID copied");
@@ -734,20 +884,22 @@ export default function EditorPage() {
               <DropdownMenuSeparator className="bg-white/[0.08]" />
               <DropdownMenuItem
                 className="text-xs focus:bg-[#23262c]"
+                style={{ color: "inherit" }}
                 onClick={handleSave}
               >
                 <Save className="mr-2 h-3.5 w-3.5" />
                 Save
-                <span className="ml-auto text-[#8b919c] text-[10px]">
+                <span className="ml-auto text-[10px]" style={{ color: "#8b919c" }}>
                   ⌘S
                 </span>
               </DropdownMenuItem>
               <DropdownMenuItem
                 className="text-xs focus:bg-[#23262c]"
-                onClick={handleExport}
+                style={{ color: "inherit" }}
+                onClick={() => setExportOpen(true)}
               >
                 <Download className="mr-2 h-3.5 w-3.5" />
-                Export PNG
+                Export Image
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -781,9 +933,69 @@ export default function EditorPage() {
                 <Pencil className="h-3 w-3 text-[#8b919c]" />
               </button>
             )}
-            <span className="text-[10px] text-[#8b919c] font-mono">
-              {template?.width}×{template?.height}
-            </span>
+            <Popover>
+              <PopoverTrigger asChild>
+                <button className="text-[10px] text-[#8b919c] font-mono hover:text-white transition-colors cursor-pointer group flex items-center gap-1">
+                  {template?.width} × {template?.height}
+                  <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="start"
+                className="w-64 p-4 border-white/10"
+                style={{ backgroundColor: "#14171c", color: "#e6e8ec" }}
+              >
+                <h4 className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: "#c4c9d2" }}>
+                  Canvas Size
+                </h4>
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                      Width (px)
+                    </Label>
+                    <Input
+                      type="number"
+                      defaultValue={template?.width}
+                      className="h-8 text-xs bg-[#0f1115] border-white/10"
+                      id="canvas-width-input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                      Height (px)
+                    </Label>
+                    <Input
+                      type="number"
+                      defaultValue={template?.height}
+                      className="h-8 text-xs bg-[#0f1115] border-white/10"
+                      id="canvas-height-input"
+                    />
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  className="w-full h-8 text-xs bg-white text-black hover:bg-white/90"
+                  onClick={() => {
+                    const w = parseInt(
+                      (document.getElementById("canvas-width-input") as HTMLInputElement).value
+                    );
+                    const h = parseInt(
+                      (document.getElementById("canvas-height-input") as HTMLInputElement).value
+                    );
+                    if (w > 0 && h > 0) {
+                      fabricCanvasRef.current?.setWidth(w);
+                      fabricCanvasRef.current?.setHeight(h);
+                      fabricCanvasRef.current?.renderAll();
+                      queryClient.setQueryData(["template", templateId], { ...template, width: w, height: h });
+                      setSaved(false);
+                      document.dispatchEvent(new MouseEvent("mousedown")); // Close popover trick
+                    }
+                  }}
+                >
+                  Apply Resize
+                </Button>
+              </PopoverContent>
+            </Popover>
           </div>
 
           <div className="flex-1" />
@@ -791,7 +1003,8 @@ export default function EditorPage() {
           <Button
             variant="ghost"
             size="sm"
-            className="text-[#e0a13a] hover:bg-[#23262c] text-xs gap-1.5"
+            className="hover:bg-[#23262c] text-xs gap-1.5"
+            style={{ color: "#e0a13a" }}
             onClick={() =>
               router.push(
                 `/playground?template=${template?.templateId}`
@@ -802,18 +1015,150 @@ export default function EditorPage() {
             Automate
           </Button>
 
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="hover:bg-[#23262c] text-xs gap-1.5"
+                style={{ color: "#c4c9d2" }}
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                Output
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              className="w-72 p-4 border-white/10"
+              style={{
+                backgroundColor: "#14171c",
+                color: "#e6e8ec",
+              }}
+            >
+              <h4 className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: "#c4c9d2" }}>
+                Output Settings
+              </h4>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                    Format
+                  </Label>
+                  <Select
+                    value={outputFormat || "__default__"}
+                    onValueChange={(v) => {
+                      setOutputFormat(v === "__default__" ? "" : v);
+                      setSaved(false);
+                    }}
+                  >
+                    <SelectTrigger className="h-8 text-xs bg-[#1f232a] border-white/[0.1] text-[#e6e8ec]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-[#14171c] border-white/[0.1] text-[#e6e8ec]">
+                      <SelectItem value="__default__">Use global default</SelectItem>
+                      <SelectItem value="png">PNG</SelectItem>
+                      <SelectItem value="jpg">JPG</SelectItem>
+                      <SelectItem value="webp">WebP</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                      Quality
+                    </Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={outputQuality}
+                      onChange={(e) => {
+                        setOutputQuality(e.target.value ? Number(e.target.value) : "");
+                        setSaved(false);
+                      }}
+                      placeholder="Default"
+                      className="h-8 text-xs bg-[#1f232a] border-white/[0.1] text-[#e6e8ec]"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                      Scale
+                    </Label>
+                    <Select
+                      value={outputScale !== "" ? String(outputScale) : "__default__"}
+                      onValueChange={(v) => {
+                        setOutputScale(v === "__default__" ? "" : Number(v));
+                        setSaved(false);
+                      }}
+                    >
+                      <SelectTrigger className="h-8 text-xs bg-[#1f232a] border-white/[0.1] text-[#e6e8ec]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#14171c] border-white/[0.1] text-[#e6e8ec]">
+                        <SelectItem value="__default__">Default</SelectItem>
+                        <SelectItem value="1">1x</SelectItem>
+                        <SelectItem value="2">2x</SelectItem>
+                        <SelectItem value="3">3x</SelectItem>
+                        <SelectItem value="4">4x</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                {(() => {
+                  const w = template?.width || 1080;
+                  const h = template?.height || 1350;
+                  const s = outputScale !== "" ? Number(outputScale) : 1;
+                  const q = outputQuality !== "" ? Number(outputQuality) : 90;
+                  const fmt = outputFormat || "png";
+                  const pixels = w * s * h * s;
+
+                  // Calculate complexity from layers
+                  let complexityScore = 1;
+                  if (template?.designJson?.objects) {
+                    template.designJson.objects.forEach((obj: any) => {
+                      if (obj.type === 'image') complexityScore += 1.5;
+                      else if (obj.type === 'i-text' || obj.type === 'textbox') complexityScore += 0.2;
+                      else complexityScore += 0.1;
+                    });
+                  }
+                  const multiplier = Math.min(Math.max(complexityScore, 1), 6);
+                  
+                  // Adjusted for highly compressible graphic templates (solid colors/text):
+                  const baseBytesPerPx =
+                    fmt === "png" 
+                      ? 0.05 
+                      : fmt === "webp" 
+                        ? 0.005 + (q / 100) * 0.01 
+                        : 0.002 + (q / 100) * 0.015;
+                        
+                  const sizeBytes = Math.round(pixels * baseBytesPerPx * multiplier);
+                  const sizeStr =
+                    sizeBytes > 1024 * 1024
+                      ? `~${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+                      : `~${Math.round(sizeBytes / 1024)} KB`;
+                  return (
+                    <p className="text-[10px] pt-1" style={{ color: "#8b919c" }}>
+                      Est. size: {sizeStr}
+                    </p>
+                  );
+                })()}
+              </div>
+
+            </PopoverContent>
+          </Popover>
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon-sm"
-                onClick={handleExport}
-                className="text-[#c4c9d2] hover:text-[#e6e8ec] hover:bg-[#23262c]"
+                onClick={() => setExportOpen(true)}
+                style={{ color: "#c4c9d2" }}
+                className="hover:bg-[#23262c]"
               >
                 <Download className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Export PNG</TooltipContent>
+            <TooltipContent>Export Image</TooltipContent>
           </Tooltip>
 
           <Button
@@ -858,23 +1203,25 @@ export default function EditorPage() {
           </div>
 
           {/* ==================== CANVAS WORKSPACE ==================== */}
-          <div className="flex-1 overflow-auto flex items-center justify-center bg-[#0f1115] relative">
+          <div ref={workspaceRef} className="flex-1 overflow-auto bg-[#0f1115] relative">
             <div
-              className="absolute inset-0 opacity-20"
+              className="absolute inset-0 opacity-20 pointer-events-none"
               style={{
                 backgroundImage:
                   "radial-gradient(circle, rgba(255,255,255,0.12) 1px, transparent 1px)",
                 backgroundSize: "24px 24px",
               }}
             />
-            <div
-              className="relative shadow-2xl"
-              style={{
-                transform: `scale(${zoom / 100})`,
-                transformOrigin: "center center",
-              }}
-            >
-              <canvas ref={canvasRef} />
+            <div className="min-h-full flex items-center justify-center p-16">
+              <div
+                className="relative shadow-2xl"
+                style={{
+                  transform: `scale(${zoom / 100})`,
+                  transformOrigin: "center center",
+                }}
+              >
+                <canvas ref={canvasRef} />
+              </div>
             </div>
           </div>
 
@@ -924,10 +1271,23 @@ export default function EditorPage() {
                           Dynamic (API modifiable)
                         </Label>
                         <Switch
-                          checked={getProp("dynamic", true)}
-                          onCheckedChange={(v) =>
-                            updateProp("dynamic", v)
-                          }
+                          checked={getProp("dynamic", false)}
+                          onCheckedChange={(v) => {
+                            updateProp("dynamic", v);
+                            // Auto-assign field name if toggling ON and name is empty
+                            if (v && !getProp("name", "")) {
+                              const canvas = fabricCanvasRef.current;
+                              const type = (activeObj?.type || "layer").toLowerCase();
+                              const count = canvas
+                                ? canvas.getObjects().filter(
+                                    (o: any) =>
+                                      (o.type || "").toLowerCase() === type
+                                  ).length
+                                : 1;
+                              const autoName = `${type}_${count}`;
+                              updateProp("name", autoName);
+                            }
+                          }}
                           className="data-[state=checked]:bg-[#1d9e75]"
                         />
                       </div>
@@ -1059,26 +1419,6 @@ export default function EditorPage() {
                                 )
                               )}
                             </div>
-                          </div>
-
-                          <div className="space-y-1.5">
-                            <Label className="text-[11px] text-[#c4c9d2]">
-                              Line Height
-                            </Label>
-                            <Input
-                              type="number"
-                              value={getProp("lineHeight", 1.2)}
-                              onChange={(e) =>
-                                updateProp(
-                                  "lineHeight",
-                                  parseFloat(e.target.value)
-                                )
-                              }
-                              step={0.1}
-                              min={0.5}
-                              max={5}
-                              className="h-8 text-xs bg-[#1f232a] border-white/[0.1] text-[#e6e8ec]"
-                            />
                           </div>
 
                           <div className="space-y-1.5">
@@ -1233,8 +1573,9 @@ export default function EditorPage() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="w-full text-xs text-[#c4c9d2] hover:bg-[#23262c]"
-                            onClick={addImage}
+                            className="w-full text-xs hover:bg-[#23262c]"
+                            style={{ color: "#c4c9d2" }}
+                            onClick={replaceImage}
                           >
                             <Upload className="mr-2 h-3.5 w-3.5" />
                             Replace Image
@@ -1248,7 +1589,8 @@ export default function EditorPage() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="w-full text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                        className="w-full text-xs hover:bg-red-500/10"
+                        style={{ color: "#f87171" }}
                         onClick={() => {
                           const canvas = fabricCanvasRef.current;
                           const obj = canvas?.getActiveObject();
@@ -1363,6 +1705,44 @@ export default function EditorPage() {
                           {layer.name ||
                             `${layer.type} ${layers.length - idx}`}
                         </span>
+
+                        <button
+                          type="button"
+                          draggable={false}
+                          className={cn(
+                            "shrink-0",
+                            layer.locked
+                              ? "text-[#e0a13a] opacity-100"
+                              : "opacity-0 group-hover:opacity-100 text-[#8b919c] hover:text-[#e6e8ec]"
+                          )}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const canvas = fabricCanvasRef.current;
+                            if (canvas) {
+                              const locked = !layer.locked;
+                              layer.object.set({
+                                selectable: !locked,
+                                evented: !locked,
+                                hasControls: !locked,
+                                hasBorders: !locked,
+                                lockMovementX: locked,
+                                lockMovementY: locked,
+                              });
+                              if (locked && activeObj === layer.object) {
+                                canvas.discardActiveObject();
+                                setSelectedObject(null);
+                              }
+                              canvas.renderAll();
+                              updateLayers();
+                            }
+                          }}
+                        >
+                          {layer.locked ? (
+                            <Lock className="h-3.5 w-3.5" />
+                          ) : (
+                            <Unlock className="h-3.5 w-3.5" />
+                          )}
+                        </button>
 
                         <button
                           type="button"
@@ -1483,5 +1863,116 @@ export default function EditorPage() {
         </div>
       </div>
     </TooltipProvider>
+
+      {/* ==================== EXPORT DIALOG ==================== */}
+      <Dialog open={exportOpen} onOpenChange={setExportOpen}>
+        <DialogContent
+          className="sm:max-w-[400px] border-white/10"
+          style={{
+            backgroundColor: "#14171c",
+            color: "#e6e8ec",
+            "--border": "220 15% 20%",
+            "--background": "220 18% 10%",
+            "--foreground": "220 10% 92%",
+            "--accent": "220 15% 16%",
+            "--accent-foreground": "220 10% 92%",
+            "--popover": "220 18% 10%",
+            "--popover-foreground": "220 10% 92%",
+            "--muted": "220 15% 16%",
+            "--muted-foreground": "220 10% 65%",
+            "--input": "220 15% 20%",
+          } as React.CSSProperties}
+        >
+          <DialogHeader>
+            <DialogTitle style={{ color: "#e6e8ec" }}>Export Image</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-5 pt-2">
+            {/* Format */}
+            <div className="space-y-1.5">
+              <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                Format
+              </Label>
+              <div className="grid grid-cols-4 gap-2">
+                {(["png", "jpeg", "webp", "svg"] as const).map((fmt) => (
+                  <button
+                    key={fmt}
+                    onClick={() => setExportFormat(fmt)}
+                    className={cn(
+                      "h-9 rounded-lg text-xs font-medium uppercase transition-colors",
+                      exportFormat === fmt
+                        ? "bg-[#2f6fde] text-white"
+                        : "bg-[#1f232a] hover:bg-[#23262c]"
+                    )}
+                    style={exportFormat !== fmt ? { color: "#c4c9d2" } : undefined}
+                  >
+                    {fmt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Quality (only for JPEG/WebP) */}
+            {(exportFormat === "jpeg" || exportFormat === "webp") && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                    Quality
+                  </Label>
+                  <span className="text-xs font-mono" style={{ color: "#8b919c" }}>
+                    {exportQuality}%
+                  </span>
+                </div>
+                <Slider
+                  value={[exportQuality]}
+                  onValueChange={([v]) => setExportQuality(v)}
+                  min={10}
+                  max={100}
+                  step={5}
+                />
+              </div>
+            )}
+
+            {/* Scale (not for SVG) */}
+            {exportFormat !== "svg" && (
+              <div className="space-y-1.5">
+                <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
+                  Scale
+                </Label>
+                <div className="grid grid-cols-4 gap-2">
+                  {[1, 2, 3, 4].map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setExportScale(s)}
+                      className={cn(
+                        "h-9 rounded-lg text-xs font-medium transition-colors",
+                        exportScale === s
+                          ? "bg-[#2f6fde] text-white"
+                          : "bg-[#1f232a] hover:bg-[#23262c]"
+                      )}
+                      style={exportScale !== s ? { color: "#c4c9d2" } : undefined}
+                    >
+                      {s}x
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px]" style={{ color: "#8b919c" }}>
+                  Output: {(template?.width || 1080) * exportScale} × {(template?.height || 1350) * exportScale}px
+                </p>
+              </div>
+            )}
+
+            {/* Export button */}
+            <Button
+              onClick={doExport}
+              className="w-full bg-[#2f6fde] hover:bg-[#2561c7] text-white"
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Export {exportFormat.toUpperCase()}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

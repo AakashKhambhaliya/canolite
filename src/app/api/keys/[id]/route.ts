@@ -6,9 +6,10 @@ import { getCurrentUser } from "@/lib/auth";
 
 export async function DELETE(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { id } = await params;
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -19,7 +20,7 @@ export async function DELETE(
       .set({ revokedAt: new Date() })
       .where(
         and(
-          eq(apiKeys.id, params.id),
+          eq(apiKeys.id, id),
           eq(apiKeys.projectId, user.projectId)
         )
       );

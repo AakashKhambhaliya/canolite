@@ -26,21 +26,22 @@ import {
   Loader2,
   TestTube,
   Settings,
-  AlertTriangle,
-  Globe,
   Bell,
   Lock,
+  HardDrive,
+  Trash2,
 } from "lucide-react";
 
 export default function SettingsPage() {
-  const [projectName, setProjectName] = useState("");
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookSecret, setWebhookSecret] = useState("");
   const [defaultFormat, setDefaultFormat] = useState("png");
   const [defaultQuality, setDefaultQuality] = useState(90);
   const [defaultScale, setDefaultScale] = useState(1);
+  const [retentionHours, setRetentionHours] = useState(24);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
 
   // Change-password form
   const [currentPassword, setCurrentPassword] = useState("");
@@ -97,9 +98,12 @@ export default function SettingsPage() {
   // Populate form when settings load
   useEffect(() => {
     if (settings) {
-      setProjectName(settings.name || "My Project");
       setWebhookUrl(settings.webhookUrl || "");
       setWebhookSecret(settings.webhookSecret || "");
+      setDefaultFormat(settings.defaultFormat || "png");
+      setDefaultQuality(settings.defaultQuality ?? 90);
+      setDefaultScale(settings.defaultScale ?? 1);
+      setRetentionHours(settings.retentionHours ?? 24);
     }
   }, [settings]);
 
@@ -110,12 +114,12 @@ export default function SettingsPage() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          projectName,
           webhookUrl,
           webhookSecret,
           defaultFormat,
           defaultQuality,
           defaultScale,
+          retentionHours,
         }),
       });
       if (!res.ok) throw new Error("Failed to save");
@@ -174,32 +178,13 @@ export default function SettingsPage() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
             <p className="text-muted-foreground">
-              Project configuration and preferences
+              Configuration and preferences
             </p>
           </div>
         </div>
       </div>
 
       <div className="space-y-6">
-        {/* Project */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <Globe className="h-4 w-4 text-muted-foreground" />
-              <CardTitle className="text-base">Project</CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label>Project name</Label>
-              <Input
-                value={projectName}
-                onChange={(e) => setProjectName(e.target.value)}
-              />
-            </div>
-          </CardContent>
-        </Card>
-
         {/* Webhooks */}
         <Card>
           <CardHeader>
@@ -309,6 +294,78 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
+        {/* Storage & cleanup */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <HardDrive className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-base">Storage</CardTitle>
+            </div>
+            <CardDescription>
+              Rendered images are auto-deleted after the retention period
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Retention Period</Label>
+                <Select
+                  value={String(retentionHours)}
+                  onValueChange={(v) => setRetentionHours(Number(v))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1 hour</SelectItem>
+                    <SelectItem value="6">6 hours</SelectItem>
+                    <SelectItem value="12">12 hours</SelectItem>
+                    <SelectItem value="24">24 hours</SelectItem>
+                    <SelectItem value="72">3 days</SelectItem>
+                    <SelectItem value="168">7 days</SelectItem>
+                    <SelectItem value="720">30 days</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Manual Cleanup</Label>
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  disabled={cleaning}
+                  onClick={async () => {
+                    setCleaning(true);
+                    try {
+                      const res = await fetch("/api/cleanup", { method: "POST" });
+                      const data = await res.json();
+                      if (data.success) {
+                        toast.success(`Cleaned up ${data.deleted} old renders`);
+                      } else {
+                        toast.error("Cleanup failed");
+                      }
+                    } catch {
+                      toast.error("Cleanup failed");
+                    } finally {
+                      setCleaning(false);
+                    }
+                  }}
+                >
+                  {cleaning ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="mr-2 h-4 w-4" />
+                  )}
+                  Clean Now
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Completed renders older than the retention period are automatically
+              deleted on every server restart and periodically while running.
+            </p>
+          </CardContent>
+        </Card>
+
         {/* Admin password */}
         <Card>
           <CardHeader>
@@ -370,30 +427,6 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Danger zone */}
-        <Card className="border-destructive/30">
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-destructive" />
-              <CardTitle className="text-base text-destructive">
-                Danger Zone
-              </CardTitle>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Delete Project</p>
-                <p className="text-xs text-muted-foreground">
-                  Permanently delete this project and all its data
-                </p>
-              </div>
-              <Button variant="destructive" size="sm">
-                Delete Project
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
 
         {/* Save */}
         <div className="flex justify-end">

@@ -34,6 +34,52 @@ import {
   Zap,
 } from "lucide-react";
 
+/**
+ * Parse CSV text handling quoted fields (commas, newlines, escaped quotes).
+ */
+function parseCSV(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        cell += '"';
+        i++; // skip escaped quote
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cell += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ",") {
+        row.push(cell.trim());
+        cell = "";
+      } else if (ch === "\n" || (ch === "\r" && next === "\n")) {
+        row.push(cell.trim());
+        if (row.some((c) => c)) rows.push(row);
+        row = [];
+        cell = "";
+        if (ch === "\r") i++; // skip \r\n
+      } else {
+        cell += ch;
+      }
+    }
+  }
+  // Last cell/row
+  row.push(cell.trim());
+  if (row.some((c) => c)) rows.push(row);
+
+  return rows;
+}
+
 type Step = "template" | "upload" | "mapping" | "preview" | "generate";
 
 export default function BulkPage() {
@@ -75,13 +121,15 @@ export default function BulkPage() {
       const items = csvData.slice(1).map((row) => {
         const mods: any[] = [];
         for (const [fieldName, csvCol] of Object.entries(fieldMapping)) {
-          if (!csvCol) continue;
+          if (!csvCol || csvCol === "__skip__") continue;
           const colIdx = csvHeaders.indexOf(csvCol);
           if (colIdx === -1) continue;
           const field = templateData?.fields?.find((f: any) => f.name === fieldName);
           const value = row[colIdx] || "";
           if (field?.type === "image") {
             mods.push({ name: fieldName, image_url: value });
+          } else if (field?.type === "shape") {
+            mods.push({ name: fieldName, fill: value });
           } else {
             mods.push({ name: fieldName, text: value });
           }
@@ -118,31 +166,33 @@ export default function BulkPage() {
 
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      const lines = text.split("\n").filter((l) => l.trim());
-      const parsed = lines.map((line) =>
-        line.split(",").map((cell) => cell.trim().replace(/^"|"$/g, ""))
-      );
-      if (parsed.length < 2) {
-        toast.error("CSV must have at least a header and one data row");
-        return;
-      }
-      setCsvHeaders(parsed[0]);
-      setCsvData(parsed);
+      try {
+        const text = ev.target?.result as string;
+        const parsed = parseCSV(text);
+        if (parsed.length < 2) {
+          toast.error("CSV must have at least a header and one data row");
+          return;
+        }
+        setCsvHeaders(parsed[0]);
+        setCsvData(parsed);
 
-      // Auto-map by matching header names to field names
-      if (templateData?.fields) {
-        const autoMap: Record<string, string> = {};
-        templateData.fields.forEach((field: any) => {
-          const match = parsed[0].find(
-            (h) => h.toLowerCase() === field.name.toLowerCase()
-          );
-          if (match) autoMap[field.name] = match;
-        });
-        setFieldMapping(autoMap);
-      }
+        // Auto-map by matching header names to field names
+        if (templateData?.fields) {
+          const autoMap: Record<string, string> = {};
+          templateData.fields.forEach((field: any) => {
+            const match = parsed[0].find(
+              (h) => h.toLowerCase() === field.name.toLowerCase()
+            );
+            if (match) autoMap[field.name] = match;
+          });
+          setFieldMapping(autoMap);
+        }
 
-      setStep("mapping");
+        setStep("mapping");
+      } catch (err) {
+        toast.error("Failed to parse CSV file");
+        console.error("CSV parse error:", err);
+      }
     };
     reader.readAsText(file);
   };
@@ -306,7 +356,7 @@ export default function BulkPage() {
                       <SelectValue placeholder="Select column..." />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">— Skip —</SelectItem>
+                      <SelectItem value="__skip__">— Skip —</SelectItem>
                       {csvHeaders.map((h) => (
                         <SelectItem key={h} value={h}>
                           {h}

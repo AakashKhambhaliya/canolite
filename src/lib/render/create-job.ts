@@ -7,7 +7,7 @@
  * single source of truth for that logic so the routes don't duplicate it.
  */
 import { db } from "@/db";
-import { templates, renderJobs } from "@/db/schema";
+import { templates, renderJobs, projects } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { generateId } from "@/lib/utils";
 import { applyModifications, type Modification } from "./apply-modifications";
@@ -19,6 +19,12 @@ export interface OutputOptions {
   scale?: number;
 }
 
+export interface GlobalDefaults {
+  defaultFormat?: string | null;
+  defaultQuality?: number | null;
+  defaultScale?: number | null;
+}
+
 export interface ResolvedOutput {
   format: string;
   quality: number;
@@ -27,14 +33,30 @@ export interface ResolvedOutput {
 
 export function resolveOutput(
   template: { outputDefaults?: unknown },
-  opts: OutputOptions
+  opts: OutputOptions,
+  global?: GlobalDefaults
 ): ResolvedOutput {
-  const defaults = (template.outputDefaults as any) || {};
+  const tpl = (template.outputDefaults as any) || {};
+  const g = global || {};
+  // Priority: API request → template-level → global settings → hardcoded
   return {
-    format: opts.format || defaults.format || "png",
-    quality: opts.quality || defaults.quality || 90,
-    scale: Math.min(opts.scale || defaults.scale || 1, 3),
+    format: opts.format || tpl.format || g.defaultFormat || "png",
+    quality: opts.quality || tpl.quality || g.defaultQuality || 90,
+    scale: Math.min(opts.scale || tpl.scale || g.defaultScale || 1, 4),
   };
+}
+
+async function fetchGlobalDefaults(projectId: string): Promise<GlobalDefaults> {
+  const [project] = await db
+    .select({
+      defaultFormat: projects.defaultFormat,
+      defaultQuality: projects.defaultQuality,
+      defaultScale: projects.defaultScale,
+    })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  return project || {};
 }
 
 export async function findTemplate(projectId: string, templateId: string) {
@@ -95,7 +117,8 @@ export async function createRenderJob(params: {
   const template = await findTemplate(params.projectId, params.templateId);
   if (!template) return null;
 
-  const resolved = resolveOutput(template, params.output);
+  const globalDefaults = await fetchGlobalDefaults(params.projectId);
+  const resolved = resolveOutput(template, params.output, globalDefaults);
   const { mods, warnings: ssrfWarnings } = await sanitizeModifications(
     params.modifications || []
   );
@@ -142,7 +165,8 @@ export async function createBatchJobs(params: {
   const template = await findTemplate(params.projectId, params.templateId);
   if (!template) return null;
 
-  const resolved = resolveOutput(template, params.output);
+  const globalDefaults = await fetchGlobalDefaults(params.projectId);
+  const resolved = resolveOutput(template, params.output, globalDefaults);
   const batchUid = generateId("batch");
   const uids: string[] = [];
 

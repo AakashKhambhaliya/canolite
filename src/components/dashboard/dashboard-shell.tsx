@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { Logo } from "@/components/logo";
+import { UpdateChecker } from "@/components/dashboard/update-checker";
 
 interface DashboardShellProps {
   children: React.ReactNode;
@@ -165,6 +166,11 @@ export function DashboardShell({ children, user }: DashboardShellProps) {
               );
             })}
           </nav>
+
+          {/* Update checker */}
+          <div className="border-t border-gray-200 dark:border-gray-800 pt-2">
+            <UpdateChecker collapsed={collapsed} />
+          </div>
 
           {/* User menu */}
           <div className="border-t border-gray-200 dark:border-gray-800 p-3">

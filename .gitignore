@@ -41,3 +41,4 @@ coverage/
 .pglite
 .pglite.*
 public/storage/
+.update-last-check

@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 
 export async function POST() {
   try {
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     const token = cookieStore.get("session_token")?.value;
 
     if (token) {

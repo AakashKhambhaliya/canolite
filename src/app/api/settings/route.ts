@@ -17,7 +17,13 @@ export async function GET() {
       .where(eq(projects.id, user.projectId))
       .limit(1);
 
-    return NextResponse.json(project);
+    return NextResponse.json({
+      ...project,
+      defaultFormat: project?.defaultFormat || "png",
+      defaultQuality: project?.defaultQuality ?? 90,
+      defaultScale: project?.defaultScale ?? 1,
+      retentionHours: project?.retentionHours ?? 24,
+    });
   } catch (error) {
     return NextResponse.json(
       { error: "Internal server error" },
@@ -34,16 +40,29 @@ export async function PUT(request: Request) {
     }
 
     const body = await request.json();
-    const { projectName, webhookUrl, webhookSecret } = body;
+    const {
+      webhookUrl,
+      webhookSecret,
+      defaultFormat,
+      defaultQuality,
+      defaultScale,
+      retentionHours,
+    } = body;
+
+    const updateData: Record<string, any> = {
+      webhookUrl: webhookUrl || null,
+      webhookSecret: webhookSecret || null,
+      updatedAt: new Date(),
+    };
+
+    if (defaultFormat !== undefined) updateData.defaultFormat = defaultFormat;
+    if (defaultQuality !== undefined) updateData.defaultQuality = Number(defaultQuality);
+    if (defaultScale !== undefined) updateData.defaultScale = Number(defaultScale);
+    if (retentionHours !== undefined) updateData.retentionHours = Number(retentionHours);
 
     await db
       .update(projects)
-      .set({
-        name: projectName,
-        webhookUrl: webhookUrl || null,
-        webhookSecret: webhookSecret || null,
-        updatedAt: new Date(),
-      })
+      .set(updateData)
       .where(eq(projects.id, user.projectId));
 
     return NextResponse.json({ success: true });

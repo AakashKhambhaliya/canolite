@@ -22,7 +22,6 @@ type DrizzleDb = NodePgDatabase<typeof schema>;
 
 function buildDb() {
   if (usePglite) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { PGlite } = require("@electric-sql/pglite");
     const { drizzle } = require("drizzle-orm/pglite");
     const dataDir =
@@ -30,7 +29,6 @@ function buildDb() {
     const client = new PGlite(dataDir);
     return drizzle(client, { schema });
   }
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { Pool } = require("pg");
   const { drizzle } = require("drizzle-orm/node-postgres");
   const pool = new Pool({ connectionString: DATABASE_URL, max: 10 });
