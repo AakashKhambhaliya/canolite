@@ -5,6 +5,7 @@ import type { NextRequest } from "next/server";
 const PUBLIC_ROUTES = [
   "/login",
   "/setup",
+  "/api/health",
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/setup",

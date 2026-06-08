@@ -52,28 +52,16 @@ services:
 
 Schema migration and demo data are applied automatically on first boot.
 
-### Optional: full stack (Postgres + Redis + MinIO)
+### Optional: external PostgreSQL
 
-For production / horizontal scaling, point Canolite at real infrastructure via
-Docker Compose:
+Prefer a real Postgres over the in-process PGlite? Set `DATABASE_URL` to a
+`postgres://…` URL and Canolite uses it instead (tables are migrated
+automatically on boot). Rendered images are still stored on local disk. A ready
+compose file is included:
 
 ```bash
-# Start infrastructure
-docker compose up -d postgres redis minio
-
-# Configure: set DATABASE_URL (postgres://…), and optionally REDIS_URL + S3_*
-cp .env.example .env
-
-# Create tables
-npm run db:push
-
-# Run the app (+ a queue worker if you use Redis/BullMQ)
-npm run dev
-npm run worker   # optional — only needed for the Redis/BullMQ render queue
+docker compose -f docker-compose.full.yml up -d --build
 ```
-
-When `DATABASE_URL` is a `postgres://…` URL, Canolite uses Postgres instead of
-PGlite. Storage falls back to local files unless S3 vars are set.
 
 ### Signing in
 
@@ -108,10 +96,11 @@ Next.js App  ──┬── Dashboard pages (editor, templates, keys, playgroun
 Render pipeline (synchronous, in-process)
         │
         ├── Database: PGlite (default) or PostgreSQL
-        └── Storage:  local filesystem (default) or S3 / MinIO
-
-Optional: Redis + BullMQ worker (npm run worker) for an out-of-process queue.
+        └── Storage:  local filesystem (persist with a volume)
 ```
+
+> A BullMQ worker (`src/queue/worker.ts`) is included if you later want an
+> out-of-process render queue, but it isn't required — renders run in-process.
 
 ---
 
@@ -184,10 +173,21 @@ GET /v1/templates/:template_id
 | Editor | Fabric.js 5.3 — snapping, layer reorder, Google Fonts, custom fonts |
 | Rendering | Headless Chromium (Playwright) + Sharp |
 | Database | In-process PGlite by default · PostgreSQL + Drizzle ORM |
-| Storage | Local filesystem by default · S3 / MinIO compatible |
-| Queue | Synchronous in-process by default · optional Redis + BullMQ |
+| Storage | Local filesystem (persist with a volume) |
+| Rendering | Synchronous, in-process (headless Chromium + Sharp) |
 | UI | Tailwind CSS + shadcn/ui + Radix UI |
 | Auth | Single-admin, session-based (bcrypt) |
+
+---
+
+## Deployment
+
+Canolite runs as a **single self-contained container** (PGlite + local storage +
+Chromium). Persist `/app/data` and `/app/public/storage`, set `APP_URL`, expose
+port `3000`, and you're done.
+
+See **[DEPLOY.md](./DEPLOY.md)** for step-by-step guides for **Coolify**,
+**Dokploy**, and a **bare VPS** (with or without Docker).
 
 ---
 
@@ -197,15 +197,12 @@ All variables are optional for the default self-contained setup.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `pglite://.pglite` | Postgres connection string. Unset or `pglite://…` → in-process PGlite |
+| `APP_URL` | `http://localhost:3000` | **Public URL of the app** — used to build stored image URLs. Set this in production. |
+| `DATABASE_URL` | `pglite://.pglite` | Unset or `pglite://…` → in-process PGlite. A `postgres://…` URL uses Postgres. |
 | `ADMIN_EMAIL` | — | Optional: auto-provision admin email on boot (skips the setup wizard) |
 | `ADMIN_PASSWORD` | — | Optional: auto-provision admin password on boot (skips the setup wizard) |
-| `AUTH_SECRET` | — | Session signing secret |
-| `APP_URL` | `http://localhost:3000` | Public URL of the app (used in stored image URLs) |
-| `RENDER_CONCURRENCY` | `3` | Max concurrent renders (BullMQ worker) |
 | `MAX_UPLOAD_MB` | `10` | Max upload file size |
-| `REDIS_URL` | `redis://localhost:6379` | Only for the optional BullMQ worker |
-| `S3_ENDPOINT` / `S3_BUCKET` / `S3_ACCESS_KEY` / `S3_SECRET_KEY` / `S3_REGION` / `S3_FORCE_PATH_STYLE` | — | Only for S3/MinIO storage (otherwise local filesystem) |
+| `AUTH_SECRET` | — | Reserved for session signing |
 
 ---
 

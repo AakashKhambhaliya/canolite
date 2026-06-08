@@ -3,9 +3,13 @@ node_modules
 .git
 .env
 .env.local
-*.md
 .vscode
 .idea
+.claude
 coverage
 dist
 out
+# Local self-contained data — never copy into the image
+.pglite
+.pglite.*
+public/storage

@@ -55,8 +55,13 @@ export async function ensureDb(): Promise<void> {
   if (globalForDb.__canoliteReady) return globalForDb.__canoliteReady;
 
   globalForDb.__canoliteReady = (async () => {
+    // Apply migrations on boot for both backends so deployments need no
+    // separate migration step.
     if (usePglite) {
       const { migrate } = require("drizzle-orm/pglite/migrator");
+      await migrate(db as any, { migrationsFolder: "./drizzle" });
+    } else {
+      const { migrate } = require("drizzle-orm/node-postgres/migrator");
       await migrate(db as any, { migrationsFolder: "./drizzle" });
     }
     const { seedIfEmpty, autoProvisionAdminFromEnv } = require("./seed-data");
