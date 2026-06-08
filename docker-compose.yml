@@ -1,0 +1,123 @@
+# ============================================================
+# Canolite — Docker Compose (development & self-hosting)
+# ============================================================
+version: "3.8"
+
+services:
+  # ---- Application ----
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://canolite:canolite@postgres:5432/canolite
+      - REDIS_URL=redis://redis:6379
+      - AUTH_SECRET=${AUTH_SECRET:-change-me-in-production-generate-with-openssl}
+      - APP_URL=${APP_URL:-http://localhost:3000}
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=canolite
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-minioadmin}
+      - S3_REGION=us-east-1
+      - S3_FORCE_PATH_STYLE=true
+      - RENDER_CONCURRENCY=${RENDER_CONCURRENCY:-3}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/auth/me"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - canolite
+
+  # ---- Render Worker ----
+  worker:
+    build: .
+    command: ["node", "-e", "require('tsx/cjs'); require('./src/queue/worker.ts')"]
+    environment:
+      - DATABASE_URL=postgresql://canolite:canolite@postgres:5432/canolite
+      - REDIS_URL=redis://redis:6379
+      - APP_URL=${APP_URL:-http://localhost:3000}
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=canolite
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-minioadmin}
+      - S3_REGION=us-east-1
+      - S3_FORCE_PATH_STYLE=true
+      - RENDER_CONCURRENCY=${RENDER_CONCURRENCY:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - canolite
+
+  # ---- PostgreSQL ----
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: canolite
+      POSTGRES_PASSWORD: canolite
+      POSTGRES_DB: canolite
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canolite"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - canolite
+
+  # ---- Redis ----
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - canolite
+
+  # ---- MinIO (S3-compatible) ----
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - canolite
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+
+networks:
+  canolite:
+    driver: bridge
