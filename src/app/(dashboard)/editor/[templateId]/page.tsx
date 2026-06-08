@@ -332,6 +332,18 @@ export default function EditorPage() {
     if (!canvas) return;
     setSaving(true);
 
+    // Fabric's toJSON crashes ("Cannot read properties of undefined (reading
+    // '0')") if a text object's `styles` is undefined — which happens for text
+    // loaded from saved JSON that has no styles key. Ensure it's a valid object.
+    for (const o of canvas.getObjects() as any[]) {
+      if (
+        /text|textbox|i-text/.test(o.type || "") &&
+        (!o.styles || typeof o.styles !== "object")
+      ) {
+        o.styles = {};
+      }
+    }
+
     const json = canvas.toJSON([
       "name",
       "dynamic",
