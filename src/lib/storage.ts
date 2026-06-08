@@ -30,6 +30,11 @@ export async function ensureBucket(): Promise<void> {
   await fs.mkdir(STORAGE_ROOT, { recursive: true });
 }
 
+/** Resolve a storage key to its absolute filesystem path (traversal-checked). */
+export function storageFilePath(key: string): string {
+  return pathForKey(key);
+}
+
 export async function uploadFile(
   key: string,
   body: Buffer | Uint8Array,

@@ -153,7 +153,9 @@ export default function BulkPage() {
     },
     onSuccess: (data) => {
       toast.success(`Batch of ${data.count || csvData.length - 1} renders queued!`);
-      router.push("/renders");
+      router.push(
+        data.batch_uid ? `/renders?batch=${data.batch_uid}` : "/renders"
+      );
     },
     onError: () => {
       toast.error("Failed to create batch");

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,8 +40,11 @@ import {
   Eye,
   FileImage,
   Trash2,
+  Download,
+  Package,
 } from "lucide-react";
 import { cn, formatRelativeTime, formatDuration, copyToClipboard } from "@/lib/utils";
+import { Suspense } from "react";
 
 const STATUS_CONFIG: Record<string, { label: string; variant: any; icon: any }> = {
   queued: {
@@ -65,8 +69,10 @@ const STATUS_CONFIG: Record<string, { label: string; variant: any; icon: any }> 
   },
 };
 
-export default function RendersPage() {
+function RendersContent() {
   const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
+  const batchUid = searchParams.get("batch");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [selectedRender, setSelectedRender] = useState<any>(null);
@@ -124,6 +130,19 @@ export default function RendersPage() {
     r.templateName?.toLowerCase().includes(search.toLowerCase())
   );
 
+  // Batch (CSV bulk) awareness for the ZIP download.
+  const batchRenders = batchUid
+    ? renders?.filter((r: any) => r.batchUid === batchUid)
+    : null;
+  const batchDone =
+    batchRenders?.filter((r: any) => r.status === "done").length ?? 0;
+  const batchTotal = batchRenders?.length ?? 0;
+  const anyDone = renders?.some((r: any) => r.status === "done") ?? false;
+  const canDownload = batchUid ? batchDone > 0 : anyDone;
+  const downloadHref = batchUid
+    ? `/api/renders/download?batch=${batchUid}`
+    : `/api/renders/download`;
+
   return (
     <div className="p-6 lg:p-8 max-w-6xl mx-auto">
       {/* Header */}
@@ -134,17 +153,61 @@ export default function RendersPage() {
             Track and manage all render jobs
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() =>
-            queryClient.invalidateQueries({ queryKey: ["renders"] })
-          }
-        >
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="accent"
+            size="sm"
+            disabled={!canDownload}
+            onClick={() => {
+              window.location.href = downloadHref;
+            }}
+            title={
+              canDownload
+                ? "Download completed renders as a ZIP"
+                : "No completed renders to download yet"
+            }
+          >
+            <Download className="mr-2 h-4 w-4" />
+            Download ZIP
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              queryClient.invalidateQueries({ queryKey: ["renders"] })
+            }
+          >
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {/* Bulk batch banner (arriving from the CSV import flow) */}
+      {batchUid && batchTotal > 0 && (
+        <div className="mb-6 flex items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 dark:border-blue-900 dark:bg-blue-950/30">
+          <div className="flex items-center gap-2 text-sm">
+            <Package className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            <span className="text-blue-800 dark:text-blue-300">
+              Bulk batch — <strong>{batchDone}</strong> of{" "}
+              <strong>{batchTotal}</strong> image{batchTotal === 1 ? "" : "s"}{" "}
+              ready
+              {batchDone < batchTotal ? " (still rendering…)" : ""}
+            </span>
+          </div>
+          <Button
+            variant="accent"
+            size="sm"
+            disabled={batchDone === 0}
+            onClick={() => {
+              window.location.href = downloadHref;
+            }}
+          >
+            <Download className="mr-1.5 h-3.5 w-3.5" />
+            Download {batchDone > 0 ? `${batchDone} ` : ""}as ZIP
+          </Button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex items-center gap-3 mb-6">
@@ -459,5 +522,13 @@ export default function RendersPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+export default function RendersPage() {
+  return (
+    <Suspense fallback={null}>
+      <RendersContent />
+    </Suspense>
   );
 }
