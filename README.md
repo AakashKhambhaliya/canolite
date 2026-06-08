@@ -52,6 +52,18 @@ services:
 
 Schema migration and demo data are applied automatically on first boot.
 
+### Run with Docker
+
+Prefer containers? The whole app runs in one self-contained image:
+
+```bash
+docker compose up -d --build
+```
+
+Persist the two volumes (`/app/data` for the database, `/app/public/storage` for
+images), set `APP_URL` to your public URL, and open the app. Full guides for
+**Coolify**, **Dokploy**, and a **bare VPS** are in **[DEPLOY.md](./DEPLOY.md)**.
+
 ### Optional: external PostgreSQL
 
 Prefer a real Postgres over the in-process PGlite? Set `DATABASE_URL` to a
