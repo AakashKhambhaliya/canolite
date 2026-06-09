@@ -369,8 +369,10 @@ export default function DocsPage() {
             </p>
             <p className="text-muted-foreground">
               To skip polling, add{" "}
-              <code className="font-mono text-xs">"synchronous": true</code> to
-              the request body. The API then waits for the render and returns{" "}
+              <code className="font-mono text-xs">
+                {`"synchronous": true`}
+              </code>{" "}
+              to the request body. The API then waits for the render and returns{" "}
               <code className="font-mono text-xs">200</code> with{" "}
               <code className="font-mono text-xs">image_url</code> directly (or{" "}
               <code className="font-mono text-xs">422</code> with an{" "}
