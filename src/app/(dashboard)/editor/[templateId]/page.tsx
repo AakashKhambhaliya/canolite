@@ -369,6 +369,22 @@ export default function EditorPage() {
     };
   }, [template?.id, updateLayers]);
 
+  // Apply zoom via Fabric's native viewport (NOT a CSS transform). CSS-scaling
+  // the canvas wrapper breaks in-canvas text editing (mis-positioned textarea /
+  // caret) and shrinks the selection control handles along with everything else.
+  // Native zoom keeps the design's logical coordinates intact while resizing the
+  // on-screen canvas, so editing and the handles stay correct at any zoom.
+  useEffect(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !canvasReady) return;
+    const z = zoom / 100;
+    const w = template?.width || 1080;
+    const h = template?.height || 1350;
+    canvas.setZoom(z);
+    canvas.setDimensions({ width: w * z, height: h * z });
+    canvas.requestRenderAll();
+  }, [zoom, canvasReady, template?.width, template?.height]);
+
   // Save handler
   const handleSave = useCallback(() => {
     const canvas = fabricCanvasRef.current;
@@ -621,33 +637,50 @@ export default function EditorPage() {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
 
-    if (exportFormat === "svg") {
-      const svg = canvas.toSVG();
-      const blob = new Blob([svg], { type: "image/svg+xml" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.download = `${templateName || "template"}.svg`;
-      link.href = url;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    } else {
-      const dataURL = canvas.toDataURL({
-        format: exportFormat as any,
-        quality: exportQuality / 100,
-        multiplier: exportScale,
-      });
-      const link = document.createElement("a");
-      link.download = `${templateName || "template"}.${exportFormat === "jpeg" ? "jpg" : exportFormat}`;
-      link.href = dataURL;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+    // The editor zooms via Fabric's viewport, so temporarily reset to 1:1 at
+    // full template dimensions before exporting, then restore the editor zoom.
+    // Otherwise the export would come out at the on-screen (zoomed) size.
+    const w = template?.width || 1080;
+    const h = template?.height || 1350;
+    const z = zoom / 100;
+    canvas.setZoom(1);
+    canvas.setDimensions({ width: w, height: h });
+    canvas.renderAll();
+
+    try {
+      if (exportFormat === "svg") {
+        const svg = canvas.toSVG();
+        const blob = new Blob([svg], { type: "image/svg+xml" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.download = `${templateName || "template"}.svg`;
+        link.href = url;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } else {
+        const dataURL = canvas.toDataURL({
+          format: exportFormat as any,
+          quality: exportQuality / 100,
+          multiplier: exportScale,
+        });
+        const link = document.createElement("a");
+        link.download = `${templateName || "template"}.${exportFormat === "jpeg" ? "jpg" : exportFormat}`;
+        link.href = dataURL;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } finally {
+      // Restore the on-screen editor zoom.
+      canvas.setZoom(z);
+      canvas.setDimensions({ width: w * z, height: h * z });
+      canvas.requestRenderAll();
     }
     setExportOpen(false);
     toast.success(`Exported as ${exportFormat.toUpperCase()}`);
-  }, [templateName, exportFormat, exportQuality, exportScale]);
+  }, [templateName, exportFormat, exportQuality, exportScale, zoom, template?.width, template?.height]);
 
   // Update selected object property
   const updateProp = useCallback(
@@ -1213,13 +1246,10 @@ export default function EditorPage() {
               }}
             />
             <div className="min-h-full flex items-center justify-center p-16">
-              <div
-                className="relative shadow-2xl"
-                style={{
-                  transform: `scale(${zoom / 100})`,
-                  transformOrigin: "center center",
-                }}
-              >
+              {/* Zoom is applied via Fabric's viewport (see the zoom effect),
+                  so the canvas element itself is already sized for the zoom —
+                  no CSS transform here. */}
+              <div className="relative shadow-2xl">
                 <canvas ref={canvasRef} />
               </div>
             </div>
