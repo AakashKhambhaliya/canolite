@@ -11,6 +11,7 @@ import { db } from "@/db";
 import { renderJobs, templates, assets } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { applyModifications } from "./apply-modifications";
+import { inlineExternalImages } from "./inline-images";
 import { renderToBuffer } from "./render-image";
 import { uploadFile, toAbsoluteUrl } from "@/lib/storage";
 
@@ -45,6 +46,11 @@ export async function processRenderJob(
       (job.modifications as any) || []
     );
 
+    // Fetch external image URLs server-side and inline them as data: URLs.
+    // The headless render page can't reliably load arbitrary external URLs
+    // (CORS, hotlink protection, redirects like Google Drive share links).
+    const renderJson = await inlineExternalImages(modifiedJson);
+
     // Project's uploaded custom fonts, so server renders match the editor.
     const fontAssets = await db
       .select()
@@ -58,7 +64,7 @@ export async function processRenderJob(
     }));
 
     const { buffer, ext } = await renderToBuffer({
-      designJson: modifiedJson,
+      designJson: renderJson,
       width: template.width,
       height: template.height,
       format: (job.format as any) || "png",
