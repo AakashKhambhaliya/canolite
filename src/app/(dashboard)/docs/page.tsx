@@ -352,6 +352,64 @@ export default function DocsPage() {
               </pre>
             </TabsContent>
           </Tabs>
+
+          {/* Response modes */}
+          <div className="mt-6 space-y-3 text-sm">
+            <h4 className="font-medium">Response modes</h4>
+            <p className="text-muted-foreground">
+              By default the request is{" "}
+              <span className="font-medium text-foreground">asynchronous</span>:
+              it returns <code className="font-mono text-xs">202</code> with a{" "}
+              <code className="font-mono text-xs">uid</code>, and you poll{" "}
+              <code className="font-mono text-xs">
+                GET {baseUrl}/v1/images/&#123;uid&#125;
+              </code>{" "}
+              until <code className="font-mono text-xs">status</code> is{" "}
+              <code className="font-mono text-xs">done</code>.
+            </p>
+            <p className="text-muted-foreground">
+              To skip polling, add{" "}
+              <code className="font-mono text-xs">"synchronous": true</code> to
+              the request body. The API then waits for the render and returns{" "}
+              <code className="font-mono text-xs">200</code> with{" "}
+              <code className="font-mono text-xs">image_url</code> directly (or{" "}
+              <code className="font-mono text-xs">422</code> with an{" "}
+              <code className="font-mono text-xs">error</code> if it fails).
+            </p>
+            <pre className="p-4 bg-muted rounded-lg text-xs overflow-auto font-mono leading-relaxed">
+              {`POST ${baseUrl}/v1/images\n\n` +
+                JSON.stringify(
+                  {
+                    template_id: selectedTemplate || "tmpl_abc123",
+                    synchronous: true,
+                    modifications:
+                      exampleMods.length > 0
+                        ? exampleMods
+                        : [{ name: "headline", text: "Hello World" }],
+                    format: "png",
+                  },
+                  null,
+                  2
+                ) +
+                `\n\n// 200 response\n` +
+                JSON.stringify(
+                  {
+                    uid: "img_abc123",
+                    status: "done",
+                    image_url: `${baseUrl}/storage/renders/img_abc123.png`,
+                    duration_ms: 1840,
+                  },
+                  null,
+                  2
+                )}
+            </pre>
+            <p className="text-xs text-muted-foreground">
+              Note: synchronous requests are best for single images. For large
+              batches use the async flow or{" "}
+              <code className="font-mono text-xs">/v1/images/batch</code> so the
+              connection isn&apos;t held open.
+            </p>
+          </div>
         </CardContent>
       </Card>
     </div>
