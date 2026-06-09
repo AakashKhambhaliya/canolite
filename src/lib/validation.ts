@@ -29,6 +29,9 @@ export const renderRequestSchema = z.object({
   quality: z.number().min(1).max(100).optional(),
   scale: z.number().min(1).max(3).optional(),
   webhook_url: z.string().url().optional(),
+  // When true, the request waits for the render to finish and returns the
+  // image_url directly instead of a queued job uid to poll.
+  synchronous: z.boolean().optional().default(false),
 });
 
 export const batchRequestSchema = z.object({
