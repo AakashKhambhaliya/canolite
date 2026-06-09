@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { db } from "@/db";
 import { sessions, users, projects } from "@/db/schema";
 import { eq, and, gt } from "drizzle-orm";
@@ -11,10 +11,25 @@ export async function createSession(userId: string): Promise<void> {
   const sessionToken = generateToken(48);
   const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   await db.insert(sessions).values({ sessionToken, userId, expires });
+
+  // Mark the cookie `Secure` only when the request actually arrived over HTTPS.
+  // Behind a TLS-terminating proxy (Coolify/Traefik/nginx) the app itself sees
+  // plain HTTP, so we trust the X-Forwarded-Proto header the proxy sets. Keying
+  // off NODE_ENV (always "production" here) would mark the cookie Secure even on
+  // plain-HTTP installs (e.g. http://server-ip:3000) — the browser then silently
+  // drops it, leaving the user stuck on the login page after a successful login.
+  const hdrs = await headers();
+  const proto = hdrs
+    .get("x-forwarded-proto")
+    ?.split(",")[0]
+    .trim()
+    .toLowerCase();
+  const isHttps = proto === "https";
+
   const cookieStore = await cookies();
   cookieStore.set("session_token", sessionToken, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: isHttps,
     sameSite: "lax",
     expires,
     path: "/",
