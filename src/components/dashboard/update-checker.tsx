@@ -323,13 +323,22 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
                 ? "Checking…"
                 : installed
                 ? "Updated!"
+                : info && info.canSelfUpdate === false
+                ? `v${info?.currentVersion || "?"}`
                 : `v${info?.currentVersion || "?"} — Up to date`}
             </p>
-            {info?.localCommit && !checking && (
-              <p className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
-                {info.localCommit}
-              </p>
-            )}
+            {!checking &&
+              (info && info.canSelfUpdate === false ? (
+                <p className="text-[10px] text-gray-400 dark:text-gray-500 truncate">
+                  Managed deployment — update via image redeploy
+                </p>
+              ) : (
+                info?.localCommit && (
+                  <p className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
+                    {info.localCommit}
+                  </p>
+                )
+              ))}
           </div>
         </button>
       )}

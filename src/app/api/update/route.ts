@@ -77,6 +77,24 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
+
+  // Image-based deploys (Docker/Coolify) have no git checkout, so we can't —
+  // and shouldn't — self-update. Report "up to date" instead of letting two
+  // failing `git rev-parse` calls return different error strings and look like
+  // an available update. These instances update by pulling a new image.
+  if (!isGitCheckout()) {
+    return NextResponse.json({
+      updateAvailable: false,
+      canSelfUpdate: false,
+      currentVersion: getVersion(),
+      localCommit: "",
+      remoteCommit: "",
+      changes: [],
+      lastCheck: getLastCheckTime(),
+      checkedAt: Date.now(),
+    });
+  }
+
   try {
     const localCommit = getLocalCommit();
     const remoteCommit = getRemoteCommit();
