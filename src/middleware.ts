@@ -17,6 +17,16 @@ const PUBLIC_ROUTES = [
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  // Public API alias: the docs/Playground advertise the clean `/v1/...` URL,
+  // but the route handlers live under `/api/v1/...`. Rewrite internally so the
+  // documented URL works and is authenticated by API key (not the session
+  // redirect below). Must run before the auth checks.
+  if (pathname === "/v1" || pathname.startsWith("/v1/")) {
+    const url = request.nextUrl.clone();
+    url.pathname = `/api${pathname}`;
+    return NextResponse.rewrite(url);
+  }
+
   // Allow public routes
   if (PUBLIC_ROUTES.some((route) => pathname.startsWith(route))) {
     return NextResponse.next();
