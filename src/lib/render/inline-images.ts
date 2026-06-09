@@ -11,7 +11,15 @@
  *
  * Same-origin / root-relative `/storage/...` sources are left untouched: they
  * already resolve against the render page's <base> and load without issue.
+ *
+ * We also re-fit each swapped image to its layer's box. A modification only
+ * changes `src`, leaving the scaleX/scaleY that were computed for the template's
+ * *original* image — so a differently-sized replacement would render at the
+ * wrong size. Using the fetched image's real dimensions, we recompute
+ * scaleX/scaleY to stretch it to exactly fill the original layer box, so the
+ * API result matches the template.
  */
+import sharp from "sharp";
 import { isUrlSafe } from "@/lib/ssrf";
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25 MB
@@ -43,7 +51,14 @@ function sniffImageType(buf: Buffer): string | null {
   return null;
 }
 
-async function fetchAsDataUrl(url: string): Promise<string> {
+interface FetchedImage {
+  dataUrl: string;
+  /** Intrinsic pixel dimensions, when they could be determined. */
+  width?: number;
+  height?: number;
+}
+
+async function fetchImage(url: string): Promise<FetchedImage> {
   if (!(await isUrlSafe(url))) {
     throw new Error(`Image URL is not allowed: ${url}`);
   }
@@ -99,7 +114,20 @@ async function fetchAsDataUrl(url: string): Promise<string> {
     );
   }
 
-  return `data:${type};base64,${buf.toString("base64")}`;
+  // Read the real pixel dimensions so the layer can be re-fitted to its box.
+  let width: number | undefined;
+  let height: number | undefined;
+  try {
+    const meta = await sharp(buf).metadata();
+    if (meta.width && meta.height) {
+      width = meta.width;
+      height = meta.height;
+    }
+  } catch {
+    // Non-raster (e.g. some SVGs) — fall back to no re-fit.
+  }
+
+  return { dataUrl: `data:${type};base64,${buf.toString("base64")}`, width, height };
 }
 
 /**
@@ -123,17 +151,35 @@ export async function inlineExternalImages(designJson: any): Promise<any> {
 
   if (urls.size === 0) return json;
 
-  const resolved = new Map<string, string>();
+  const resolved = new Map<string, FetchedImage>();
   await Promise.all(
     Array.from(urls).map(async (url) => {
-      resolved.set(url, await fetchAsDataUrl(url));
+      resolved.set(url, await fetchImage(url));
     })
   );
 
   const apply = (objects: any[]) => {
     for (const obj of objects || []) {
       if ((obj?.type || "").toLowerCase() === "image" && resolved.has(obj.src)) {
-        obj.src = resolved.get(obj.src);
+        const img = resolved.get(obj.src)!;
+
+        // Box the template laid out for the original image (display size).
+        const boxW = (obj.width || 0) * (obj.scaleX ?? 1);
+        const boxH = (obj.height || 0) * (obj.scaleY ?? 1);
+
+        obj.src = img.dataUrl;
+
+        // Stretch the replacement to fill exactly that box, so the API result
+        // matches the template regardless of the new image's aspect ratio.
+        if (img.width && img.height && boxW > 0 && boxH > 0) {
+          obj.width = img.width;
+          obj.height = img.height;
+          obj.scaleX = boxW / img.width;
+          obj.scaleY = boxH / img.height;
+          // Drop any crop carried over from the original image.
+          obj.cropX = 0;
+          obj.cropY = 0;
+        }
       }
       if (obj?.objects) apply(obj.objects);
     }
