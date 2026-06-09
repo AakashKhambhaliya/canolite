@@ -11,6 +11,7 @@ const PUBLIC_ROUTES = [
   "/api/auth/setup",
   "/api/v1/", // Public API uses API key auth, not session
   "/api/placeholder",
+  "/storage/", // Rendered images / uploads — served publicly by design
 ];
 
 export function middleware(request: NextRequest) {
