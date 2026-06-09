@@ -42,3 +42,4 @@ coverage/
 .pglite.*
 public/storage/
 .update-last-check
+.update-status.json

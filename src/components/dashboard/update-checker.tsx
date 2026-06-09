@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -24,16 +24,29 @@ interface UpdateInfo {
   changes: string[];
   lastCheck: number;
   checkedAt: number;
+  canSelfUpdate?: boolean;
   error?: string;
 }
 
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
+const RESTART_TIMEOUT = 8 * 60 * 1000; // give the rebuild+restart up to 8 min
+
+const PHASE_LABELS: Record<string, string> = {
+  pulling: "Pulling latest code…",
+  installing: "Installing dependencies…",
+  building: "Building the new version…",
+  restarting: "Restarting…",
+};
 
 export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [installed, setInstalled] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartPhase, setRestartPhase] = useState<string>("pulling");
+  const [restartStuck, setRestartStuck] = useState(false);
+  const pollingRef = useRef(false);
 
   const checkForUpdates = useCallback(async (silent = false) => {
     setChecking(true);
@@ -53,34 +66,89 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     }
   }, []);
 
+  /**
+   * Once the update is kicked off the server rebuilds and then restarts itself.
+   * We poll: track progress, wait for the server to go *down* (the restart) and
+   * come back *up* on the new build, then reload into it. This is what keeps the
+   * flow from getting stuck "at restart".
+   */
+  const pollUntilRestarted = useCallback(() => {
+    if (pollingRef.current) return;
+    pollingRef.current = true;
+    const startedAt = Date.now();
+    let sawDown = false;
+
+    const tick = async () => {
+      if (Date.now() - startedAt > RESTART_TIMEOUT) {
+        pollingRef.current = false;
+        setRestartStuck(true);
+        return;
+      }
+
+      // Progress + failure detection (best-effort; fails while server is down).
+      try {
+        const s = await fetch("/api/update/status", {
+          cache: "no-store",
+        }).then((r) => r.json());
+        if (s.phase === "error") {
+          pollingRef.current = false;
+          setRestarting(false);
+          setInstalling(false);
+          toast.error("Update failed: " + (s.error || "unknown error"));
+          return;
+        }
+        if (s.phase && s.phase !== "idle") setRestartPhase(s.phase);
+      } catch {
+        /* server is mid-restart — ignore */
+      }
+
+      // Liveness probe.
+      let up = false;
+      try {
+        const r = await fetch("/api/health", { cache: "no-store" });
+        up = r.ok;
+      } catch {
+        up = false;
+      }
+
+      if (!up) {
+        sawDown = true;
+      } else if (sawDown) {
+        // The new build is live — reload into it.
+        window.location.reload();
+        return;
+      }
+
+      setTimeout(tick, 2000);
+    };
+
+    tick();
+  }, []);
+
   const installUpdate = useCallback(async () => {
     setInstalling(true);
+    setRestartStuck(false);
     try {
       const res = await fetch("/api/update", { method: "POST" });
       const data = await res.json();
-      if (data.success) {
+
+      if (data.success && data.restarting) {
+        // Update is running in the background; wait for the restart.
         setInstalled(true);
-        toast.success(data.message);
-        // Refresh the info
-        setInfo((prev) =>
-          prev
-            ? {
-                ...prev,
-                updateAvailable: false,
-                localCommit: data.newCommit,
-                currentVersion: data.newVersion,
-              }
-            : prev
-        );
+        setRestarting(true);
+        setRestartPhase("pulling");
+        toast.success(data.message || "Updating…");
+        pollUntilRestarted();
       } else {
+        // e.g. not a git checkout — can't self-update.
         toast.error(data.message || "Update failed");
+        setInstalling(false);
       }
     } catch {
-      toast.error("Failed to install update");
-    } finally {
+      toast.error("Failed to start update");
       setInstalling(false);
     }
-  }, []);
+  }, [pollUntilRestarted]);
 
   // Auto-check on mount + every 24 hours (silent — no error toasts)
   useEffect(() => {
@@ -89,7 +157,11 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     return () => clearInterval(interval);
   }, [checkForUpdates]);
 
-  // Collapsed: show just an icon with tooltip
+  const restartLabel = restartStuck
+    ? "Update applied — restart the server, then reload"
+    : PHASE_LABELS[restartPhase] || "Updating…";
+
+  // --- Collapsed: just an icon with a tooltip ---------------------------------
   if (collapsed) {
     return (
       <div className="px-3 pb-2">
@@ -97,11 +169,13 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
           <TooltipTrigger asChild>
             <button
               onClick={() =>
-                info?.updateAvailable && !installed
+                restarting
+                  ? restartStuck && window.location.reload()
+                  : info?.updateAvailable && !installed
                   ? installUpdate()
                   : checkForUpdates()
               }
-              disabled={checking || installing}
+              disabled={checking || installing || (restarting && !restartStuck)}
               className={cn(
                 "w-full flex items-center justify-center py-2.5 rounded-lg transition-colors",
                 info?.updateAvailable && !installed
@@ -109,7 +183,11 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
                   : "text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-800"
               )}
             >
-              {checking || installing ? (
+              {restarting && !restartStuck ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : restartStuck ? (
+                <RefreshCw className="h-5 w-5" />
+              ) : checking || installing ? (
                 <Loader2 className="h-5 w-5 animate-spin" />
               ) : info?.updateAvailable && !installed ? (
                 <ArrowDownCircle className="h-5 w-5" />
@@ -119,7 +197,9 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
             </button>
           </TooltipTrigger>
           <TooltipContent side="right">
-            {checking
+            {restarting
+              ? restartLabel
+              : checking
               ? "Checking for updates…"
               : installing
               ? "Installing update…"
@@ -132,7 +212,43 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     );
   }
 
-  // Expanded sidebar
+  // --- Expanded sidebar -------------------------------------------------------
+
+  // Restarting / rebuilding state takes priority over everything else.
+  if (restarting) {
+    return (
+      <div className="px-3 pb-2">
+        <div className="rounded-lg bg-blue-50 dark:bg-blue-950/30 p-3 space-y-1.5">
+          <div className="flex items-center gap-2">
+            {restartStuck ? (
+              <RefreshCw className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            ) : (
+              <Loader2 className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0 animate-spin" />
+            )}
+            <span className="text-xs font-semibold text-blue-700 dark:text-blue-300">
+              {restartStuck ? "Almost there" : "Updating…"}
+            </span>
+          </div>
+          <p className="text-[10px] text-blue-600/80 dark:text-blue-400/70 leading-relaxed">
+            {restartLabel}
+          </p>
+          {restartStuck ? (
+            <button
+              onClick={() => window.location.reload()}
+              className="mt-1 w-full h-7 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium transition-colors"
+            >
+              Reload now
+            </button>
+          ) : (
+            <p className="text-[10px] text-blue-500/70 dark:text-blue-400/50">
+              Don&apos;t close this tab — it&apos;ll reload automatically.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="px-3 pb-2">
       {info?.updateAvailable && !installed ? (
@@ -206,7 +322,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
               {checking
                 ? "Checking…"
                 : installed
-                ? "Updated! Restart to apply"
+                ? "Updated!"
                 : `v${info?.currentVersion || "?"} — Up to date`}
             </p>
             {info?.localCommit && !checking && (
