@@ -1,8 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { execSync } from "child_process";
 import path from "path";
 import fs from "fs";
 import { getCurrentUser } from "@/lib/auth";
+import { startUpdate, isGitCheckout } from "@/lib/updater";
 
 const ROOT = process.cwd();
 
@@ -95,6 +96,9 @@ export async function GET() {
       changes,
       lastCheck,
       checkedAt: Date.now(),
+      // Whether the in-app updater can apply this (a git checkout). Pure Docker
+      // image deploys must update by pulling a new image instead.
+      canSelfUpdate: isGitCheckout(),
     });
   } catch (e: any) {
     return NextResponse.json(
@@ -114,56 +118,50 @@ export async function GET() {
 }
 
 /**
- * POST /api/update — Install update (git pull + npm install)
+ * POST /api/update — Install update (git pull → npm install → build → restart)
+ *
+ * The actual work runs in the background (see lib/updater). This handler just
+ * kicks it off and returns immediately; the client polls GET /api/update/status
+ * and reloads once the rebuilt server comes back up.
  */
-export async function POST(_req: NextRequest) {
-  // Admin only — this performs `git pull` + `npm install` on the server, so it
-  // MUST require an authenticated session (otherwise it's a remote code
-  // execution vector).
+export async function POST() {
+  // Admin only — this performs `git pull` + `npm install` + `npm run build` on
+  // the server, so it MUST require an authenticated session (otherwise it's a
+  // remote code execution vector).
   const user = await getCurrentUser();
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
-  try {
-    const branch = run("git rev-parse --abbrev-ref HEAD") || "main";
 
-    // Stash any local changes (shouldn't be any in production)
-    run("git stash --quiet 2>/dev/null || true");
+  const { started, reason } = startUpdate();
 
-    // Pull latest
-    const pullResult = run(`git pull origin ${branch} --ff-only`);
-
-    // Check if package.json changed and run npm install
-    const diffFiles = run(
-      `git diff HEAD~1 --name-only 2>/dev/null || echo ""`
-    );
-    let npmInstalled = false;
-    if (diffFiles.includes("package.json") || diffFiles.includes("package-lock.json")) {
-      run("npm install --production --no-audit --no-fund");
-      npmInstalled = true;
+  if (!started) {
+    if (reason === "not-a-git-checkout") {
+      return NextResponse.json(
+        {
+          success: false,
+          restarting: false,
+          message:
+            "This deployment can't update itself in-app (no git checkout). " +
+            "Update by pulling the new Docker image: re-run install.sh or " +
+            "`docker compose pull && docker compose up -d`.",
+        },
+        { status: 200 }
+      );
     }
-
-    // Update the version
-    const newVersion = getVersion();
-    const newCommit = getLocalCommit().slice(0, 7);
-
-    setLastCheckTime();
-
+    // already-running
     return NextResponse.json({
       success: true,
-      message: "Update installed successfully. Please restart the application.",
-      pullResult,
-      npmInstalled,
-      newVersion,
-      newCommit,
+      restarting: true,
+      message: "An update is already in progress.",
     });
-  } catch (e: any) {
-    return NextResponse.json(
-      {
-        success: false,
-        message: e.message || "Failed to install update",
-      },
-      { status: 500 }
-    );
   }
+
+  return NextResponse.json({
+    success: true,
+    restarting: true,
+    message:
+      "Update started — the app will rebuild and restart automatically. " +
+      "Please don't close this tab.",
+  });
 }
