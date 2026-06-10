@@ -73,6 +73,7 @@ import {
   SlidersHorizontal,
   Lock,
   Unlock,
+  Maximize2,
 } from "lucide-react";
 
 // We'll store the fabric module reference once loaded
@@ -125,6 +126,14 @@ export default function EditorPage() {
 
   const [selectedObject, setSelectedObject] = useState<any>(null);
   const [zoom, setZoom] = useState(70);
+  // Lowest zoom the user can reach. Computed relative to the canvas size vs the
+  // workspace viewport so a large template can always be zoomed out far enough
+  // to fit on screen (a fixed floor stranded big canvases — they couldn't shrink
+  // enough to be fully visible). Capped at 20 so small canvases keep the old feel.
+  const [minZoom, setMinZoom] = useState(20);
+  // Tracks which template id has already been auto-fitted, so we only shrink an
+  // oversized canvas to fit on first open — never fighting the user afterwards.
+  const fittedTemplateRef = useRef<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(true);
   const [editingName, setEditingName] = useState(false);
@@ -384,6 +393,48 @@ export default function EditorPage() {
     canvas.setDimensions({ width: w * z, height: h * z });
     canvas.requestRenderAll();
   }, [zoom, canvasReady, template?.width, template?.height]);
+
+  // The zoom % that makes the whole template fit inside the workspace viewport
+  // (accounting for the p-16 = 64px padding on each side). Rounded down to the
+  // slider's 5% step, with a hard 5% floor for sanity on huge canvases.
+  const computeFitZoom = useCallback(() => {
+    const ws = workspaceRef.current;
+    const w = template?.width || 1080;
+    const h = template?.height || 1350;
+    const availW = (ws?.clientWidth || 800) - 128;
+    const availH = (ws?.clientHeight || 600) - 128;
+    const fit = Math.min(availW / w, availH / h) * 100;
+    return Math.max(5, Math.floor(fit / 5) * 5);
+  }, [template?.width, template?.height]);
+
+  // Keep the zoom floor relative to the canvas/viewport, and re-derive it when
+  // the workspace resizes (window resize, sidebar toggles, etc.). Clamp the
+  // current zoom up if it ends up below the new floor.
+  useEffect(() => {
+    if (!canvasReady) return;
+    const recompute = () => {
+      const floor = Math.max(5, Math.min(20, computeFitZoom()));
+      setMinZoom(floor);
+      setZoom((z) => (z < floor ? floor : z));
+    };
+    recompute();
+    const ws = workspaceRef.current;
+    if (!ws || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(recompute);
+    ro.observe(ws);
+    return () => ro.disconnect();
+  }, [canvasReady, computeFitZoom]);
+
+  // On first open of a template, fit a *genuinely oversized* canvas — one that
+  // can't be made to fit within the old fixed 20% floor. Normal templates keep
+  // their default zoom so this doesn't change everyday behavior.
+  useEffect(() => {
+    if (!canvasReady || !template?.id) return;
+    if (fittedTemplateRef.current === template.id) return;
+    fittedTemplateRef.current = template.id;
+    const fit = computeFitZoom();
+    if (fit < 20) setZoom(fit);
+  }, [canvasReady, template?.id, computeFitZoom]);
 
   // Save handler
   const handleSave = useCallback(() => {
@@ -1814,7 +1865,7 @@ export default function EditorPage() {
                 variant="ghost"
                 size="icon-sm"
                 className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec]"
-                onClick={() => setZoom(Math.max(20, zoom - 10))}
+                onClick={() => setZoom(Math.max(minZoom, zoom - 10))}
               >
                 <Minus className="h-3 w-3" />
               </Button>
@@ -1825,7 +1876,7 @@ export default function EditorPage() {
           <Slider
             value={[zoom]}
             onValueChange={([v]) => setZoom(v)}
-            min={20}
+            min={minZoom}
             max={200}
             step={5}
             className="w-28"
@@ -1834,6 +1885,20 @@ export default function EditorPage() {
           <span className="text-[11px] text-[#8b919c] font-mono w-10">
             {zoom}%
           </span>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec]"
+                onClick={() => setZoom(computeFitZoom())}
+              >
+                <Maximize2 className="h-3 w-3" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Fit to screen</TooltipContent>
+          </Tooltip>
 
           <Separator
             orientation="vertical"
