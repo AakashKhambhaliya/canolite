@@ -40,8 +40,26 @@ const globalForDb = globalThis as unknown as {
   __canoliteReady?: Promise<void>;
 };
 
-export const db: DrizzleDb = (globalForDb.__canoliteDb ?? buildDb()) as DrizzleDb;
-if (process.env.NODE_ENV !== "production") globalForDb.__canoliteDb = db;
+// Instantiate the backend lazily on first use. Importing this module must NOT
+// spin up PGlite: `next build` evaluates every route module (all of which
+// import `db`) while collecting page data, and eagerly constructing the PGlite
+// WASM instance there crashes the build in slim Linux images ("RuntimeError:
+// Aborted()"). Deferring construction to the first query keeps the build pure
+// and only starts the DB at runtime, where instrumentation calls ensureDb().
+function getDb(): DrizzleDb {
+  if (!globalForDb.__canoliteDb) {
+    globalForDb.__canoliteDb = buildDb() as DrizzleDb;
+  }
+  return globalForDb.__canoliteDb;
+}
+
+export const db: DrizzleDb = new Proxy({} as DrizzleDb, {
+  get(_target, prop, receiver) {
+    const real = getDb() as any;
+    const value = Reflect.get(real, prop, receiver);
+    return typeof value === "function" ? value.bind(real) : value;
+  },
+}) as DrizzleDb;
 
 export type DB = typeof db;
 
