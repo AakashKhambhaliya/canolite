@@ -15,6 +15,8 @@ import { inlineExternalImages } from "./inline-images";
 import { renderToBuffer } from "./render-image";
 import { uploadFile, toAbsoluteUrl } from "@/lib/storage";
 
+const WEBHOOK_TIMEOUT_MS = 10_000;
+
 export async function processRenderJob(
   uid: string,
   opts: { rethrow?: boolean } = {}
@@ -84,6 +86,10 @@ export async function processRenderJob(
       .where(eq(renderJobs.uid, uid));
 
     if (job.webhookUrl) {
+      // Bound the delivery so a slow or hung webhook endpoint can't stall the
+      // render worker (which processes jobs serially).
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
       try {
         await fetch(job.webhookUrl, {
           method: "POST",
@@ -99,9 +105,12 @@ export async function processRenderJob(
             image_url: toAbsoluteUrl(imageUrl),
             duration_ms: durationMs,
           }),
+          signal: controller.signal,
         });
       } catch (webhookErr) {
         console.error(`[render] Webhook failed for ${uid}:`, webhookErr);
+      } finally {
+        clearTimeout(timer);
       }
     }
 
