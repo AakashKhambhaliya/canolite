@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
+import { isUrlSafe } from "@/lib/ssrf";
+
+const WEBHOOK_TIMEOUT_MS = 10_000;
 
 export async function POST(request: Request) {
   try {
@@ -17,6 +20,15 @@ export async function POST(request: Request) {
       );
     }
 
+    // SSRF guard: same rule the real webhook-delivery paths enforce — only
+    // public http(s) hosts, never localhost / private / metadata addresses.
+    if (!(await isUrlSafe(webhookUrl))) {
+      return NextResponse.json(
+        { error: "webhookUrl must be a public http(s) URL" },
+        { status: 400 }
+      );
+    }
+
     // Send test webhook
     const payload = {
       event: "test",
@@ -26,14 +38,23 @@ export async function POST(request: Request) {
       timestamp: new Date().toISOString(),
     };
 
-    const response = await fetch(webhookUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Canolite-Event": "test",
-      },
-      body: JSON.stringify(payload),
-    });
+    // Bound the request so a hung endpoint can't tie up the server.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Canolite-Event": "test",
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!response.ok) {
       return NextResponse.json(

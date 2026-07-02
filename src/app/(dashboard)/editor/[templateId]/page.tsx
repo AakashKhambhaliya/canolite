@@ -154,6 +154,22 @@ export default function EditorPage() {
   const [, forceUpdate] = useState(0);
   const rerender = () => forceUpdate((n) => n + 1);
 
+  // ---- Undo / redo history -------------------------------------------------
+  // Fabric v6 has no built-in history, so we keep a bounded stack of canvas
+  // JSON snapshots. Pushed on every add/modify/remove; restored on undo/redo.
+  const HISTORY_LIMIT = 80;
+  const HISTORY_PROPS = ["name", "dynamic", "id", "selectable", "evented"];
+  const historyRef = useRef<{
+    stack: string[];
+    index: number;
+    restoring: boolean;
+  }>({ stack: [], index: -1, restoring: false });
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  // The event handlers registered inside the init effect close over an early
+  // render, so we reach the latest snapshot fn through a ref.
+  const snapshotRef = useRef<() => void>(() => {});
+
   // Fetch template
   const { data: template, isLoading, isError } = useQuery({
     queryKey: ["template", templateId],
@@ -235,8 +251,12 @@ export default function EditorPage() {
         return;
       const [moved] = panel.splice(from, 1);
       panel.splice(to, 0, moved);
-      // Apply the new stacking: bottom→top is the panel reversed.
-      [...panel].reverse().forEach((l, i) => canvas.moveTo(l.object, i));
+      // Apply the new stacking: bottom→top is the panel reversed. Fabric v6
+      // renamed the per-object stacking helper to `moveObjectTo` (the old
+      // `canvas.moveTo` no longer exists and threw at runtime).
+      [...panel]
+        .reverse()
+        .forEach((l, i) => canvas.moveObjectTo(l.object, i));
       canvas.renderAll();
       setSaved(false);
       updateLayers();
@@ -244,6 +264,108 @@ export default function EditorPage() {
     },
     [layers, updateLayers]
   );
+
+  // Serialize the current canvas and push it onto the history stack. No-ops
+  // while loading a template or restoring a snapshot (so those don't pollute
+  // history), and de-dupes identical consecutive states.
+  const pushHistory = useCallback(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+    const h = historyRef.current;
+    if (h.restoring || loadingRef.current) return;
+    // Guard the same Fabric toObject crash handleSave does (text with an
+    // undefined `styles`).
+    for (const o of canvas.getObjects() as any[]) {
+      if (
+        /text|textbox|i-text/i.test(o.type || "") &&
+        (!o.styles || typeof o.styles !== "object")
+      ) {
+        o.styles = {};
+      }
+    }
+    const json = JSON.stringify(canvas.toObject(HISTORY_PROPS));
+    if (h.stack[h.index] === json) return;
+    // Drop any redo tail, append, and cap the stack length.
+    h.stack = h.stack.slice(0, h.index + 1);
+    h.stack.push(json);
+    if (h.stack.length > HISTORY_LIMIT) h.stack.shift();
+    h.index = h.stack.length - 1;
+    setCanUndo(h.index > 0);
+    setCanRedo(false);
+  }, []);
+  // Keep the ref current so canvas event handlers call the latest version.
+  snapshotRef.current = pushHistory;
+
+  const restoreHistory = useCallback(
+    async (json: string) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) return;
+      const h = historyRef.current;
+      h.restoring = true;
+      loadingRef.current = true;
+      try {
+        await canvas.loadFromJSON(JSON.parse(json));
+        canvas.renderAll();
+      } finally {
+        loadingRef.current = false;
+        h.restoring = false;
+      }
+      setSelectedObject(null);
+      setSaved(false);
+      updateLayers();
+      rerender();
+    },
+    [updateLayers]
+  );
+
+  const undo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.index <= 0) return;
+    h.index -= 1;
+    setCanUndo(h.index > 0);
+    setCanRedo(h.index < h.stack.length - 1);
+    restoreHistory(h.stack[h.index]);
+  }, [restoreHistory]);
+
+  const redo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.index >= h.stack.length - 1) return;
+    h.index += 1;
+    setCanUndo(h.index > 0);
+    setCanRedo(h.index < h.stack.length - 1);
+    restoreHistory(h.stack[h.index]);
+  }, [restoreHistory]);
+
+  // Clone the selected object (offset a little so it's visible) and select it.
+  const duplicateSelected = useCallback(async () => {
+    const canvas = fabricCanvasRef.current;
+    const active = canvas?.getActiveObject();
+    if (!canvas || !active) return;
+    const cloned = await active.clone(HISTORY_PROPS);
+    // Give the clone its own identity so layer keys / history stay consistent.
+    cloned.set({
+      left: (active.left || 0) + 16,
+      top: (active.top || 0) + 16,
+      id: undefined,
+    });
+    canvas.add(cloned);
+    canvas.setActiveObject(cloned);
+    canvas.renderAll();
+    setSelectedObject(cloned);
+    rerender();
+  }, []);
+
+  // Move the selected object by a keyboard nudge (1px, or 10px with Shift).
+  const nudgeSelected = useCallback((dx: number, dy: number) => {
+    const canvas = fabricCanvasRef.current;
+    const active = canvas?.getActiveObject();
+    if (!canvas || !active) return;
+    active.set({ left: (active.left || 0) + dx, top: (active.top || 0) + dy });
+    active.setCoords();
+    canvas.renderAll();
+    // Reuse the modified path so it marks unsaved + records history.
+    canvas.fire("object:modified", { target: active });
+  }, []);
 
   // Initialize Fabric canvas — once per mount, from the loaded template.
   useEffect(() => {
@@ -293,6 +415,11 @@ export default function EditorPage() {
           loadingRef.current = false;
           setSaved(true);
           setCanvasReady(true);
+          // Seed the undo baseline with the freshly loaded design.
+          historyRef.current = { stack: [], index: -1, restoring: false };
+          snapshotRef.current();
+          setCanUndo(false);
+          setCanRedo(false);
           // Scroll workspace to center the canvas
           requestAnimationFrame(() => {
             const ws = workspaceRef.current;
@@ -314,6 +441,11 @@ export default function EditorPage() {
       } else {
         loadingRef.current = false;
         setCanvasReady(true);
+        // Seed the undo baseline with the empty canvas.
+        historyRef.current = { stack: [], index: -1, restoring: false };
+        snapshotRef.current();
+        setCanUndo(false);
+        setCanRedo(false);
         requestAnimationFrame(() => {
           const ws = workspaceRef.current;
           if (ws) {
@@ -341,15 +473,18 @@ export default function EditorPage() {
       canvas.on("object:modified", () => {
         if (!loadingRef.current) setSaved(false);
         updateLayers();
+        snapshotRef.current();
         rerender();
       });
       canvas.on("object:added", () => {
         if (!loadingRef.current) setSaved(false);
         updateLayers();
+        snapshotRef.current();
       });
       canvas.on("object:removed", () => {
         if (!loadingRef.current) setSaved(false);
         updateLayers();
+        snapshotRef.current();
       });
 
       // Corner / center / edge snapping with alignment guides.
@@ -478,26 +613,74 @@ export default function EditorPage() {
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      const mod = e.metaKey || e.ctrlKey;
+      // Don't hijack keys while typing in a form field or editing text in-canvas
+      // (Fabric routes in-canvas text through a hidden <textarea>).
+      const tag = document.activeElement?.tagName;
+      const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+
+      if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         handleSave();
+        return;
       }
+
+      // Undo / redo: ⌘Z / ⌘⇧Z (and ⌘Y for redo).
+      if (mod && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        redo();
+        return;
+      }
+
+      // Duplicate: ⌘D
+      if (mod && e.key.toLowerCase() === "d") {
+        if (typing) return;
+        e.preventDefault();
+        void duplicateSelected();
+        return;
+      }
+
       if (e.key === "Delete" || e.key === "Backspace") {
-        const tag = document.activeElement?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (typing) return;
         const canvas = fabricCanvasRef.current;
         const active = canvas?.getActiveObject();
         if (active) {
+          e.preventDefault();
           canvas.remove(active);
           setSelectedObject(null);
           canvas.discardActiveObject();
           canvas.renderAll();
         }
+        return;
+      }
+
+      // Arrow-key nudge (1px, or 10px with Shift).
+      if (
+        !typing &&
+        (e.key === "ArrowUp" ||
+          e.key === "ArrowDown" ||
+          e.key === "ArrowLeft" ||
+          e.key === "ArrowRight")
+      ) {
+        const canvas = fabricCanvasRef.current;
+        if (!canvas?.getActiveObject()) return;
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        if (e.key === "ArrowUp") nudgeSelected(0, -step);
+        else if (e.key === "ArrowDown") nudgeSelected(0, step);
+        else if (e.key === "ArrowLeft") nudgeSelected(-step, 0);
+        else nudgeSelected(step, 0);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleSave]);
+  }, [handleSave, undo, redo, duplicateSelected, nudgeSelected]);
 
   // Tool actions — all use the already-loaded fabric module
   const addText = useCallback(async () => {
@@ -1910,7 +2093,9 @@ export default function EditorPage() {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec]"
+                onClick={undo}
+                disabled={!canUndo}
+                className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec] disabled:opacity-40"
               >
                 <Undo2 className="h-3.5 w-3.5" />
               </Button>
@@ -1923,7 +2108,9 @@ export default function EditorPage() {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec]"
+                onClick={redo}
+                disabled={!canRedo}
+                className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec] disabled:opacity-40"
               >
                 <Redo2 className="h-3.5 w-3.5" />
               </Button>

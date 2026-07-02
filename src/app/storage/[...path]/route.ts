@@ -44,14 +44,27 @@ export async function GET(
   try {
     const data = await fs.readFile(filePath);
     const ext = path.extname(filePath).slice(1).toLowerCase();
-    return new NextResponse(new Uint8Array(data), {
-      status: 200,
-      headers: {
-        "Content-Type": MIME[ext] || "application/octet-stream",
-        // Keys are unique per render/upload, so the bytes never change.
-        "Cache-Control": "public, max-age=31536000, immutable",
-      },
-    });
+
+    const headers: Record<string, string> = {
+      "Content-Type": MIME[ext] || "application/octet-stream",
+      // Keys are unique per render/upload, so the bytes never change.
+      "Cache-Control": "public, max-age=31536000, immutable",
+      // Never let the browser MIME-sniff user-supplied bytes into something
+      // executable.
+      "X-Content-Type-Options": "nosniff",
+    };
+
+    // SVGs served inline from our own origin are a stored-XSS vector: a crafted
+    // <svg> can carry <script>/onload handlers that run in this origin's
+    // context. Neutralize them with a locked-down CSP + a sandbox that blocks
+    // scripts, so an <img src>/<object> still renders the drawing but never
+    // executes code. (Raster formats can't execute, so they're unaffected.)
+    if (ext === "svg") {
+      headers["Content-Security-Policy"] =
+        "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+    }
+
+    return new NextResponse(new Uint8Array(data), { status: 200, headers });
   } catch {
     return new NextResponse("Not found", { status: 404 });
   }
