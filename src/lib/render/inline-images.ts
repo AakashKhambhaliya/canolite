@@ -20,7 +20,7 @@
  * API result matches the template.
  */
 import sharp from "sharp";
-import { isUrlSafe } from "@/lib/ssrf";
+import { safeFetch } from "@/lib/ssrf";
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25 MB
 const FETCH_TIMEOUT_MS = 15_000;
@@ -59,16 +59,14 @@ interface FetchedImage {
 }
 
 async function fetchImage(url: string): Promise<FetchedImage> {
-  if (!(await isUrlSafe(url))) {
-    throw new Error(`Image URL is not allowed: ${url}`);
-  }
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(url, {
-      redirect: "follow",
+    // safeFetch re-validates every redirect hop against the SSRF guard, not
+    // just this original URL — a plain `fetch(url, { redirect: "follow" })`
+    // would let a URL that passes the check 302 to an internal address.
+    res = await safeFetch(url, {
       signal: controller.signal,
       headers: {
         // Some hosts (incl. Google Drive) reject requests without a UA.

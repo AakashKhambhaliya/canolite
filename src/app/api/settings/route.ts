@@ -3,6 +3,8 @@ import { db } from "@/db";
 import { projects } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
+import { settingsSchema } from "@/lib/validation";
+import { isUrlSafe } from "@/lib/ssrf";
 
 export async function GET() {
   try {
@@ -39,7 +41,13 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const body = await request.json();
+    const parsed = settingsSchema.safeParse(await request.json());
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: parsed.error.issues[0]?.message || "Invalid settings" },
+        { status: 400 }
+      );
+    }
     const {
       webhookUrl,
       webhookSecret,
@@ -47,7 +55,19 @@ export async function PUT(request: Request) {
       defaultQuality,
       defaultScale,
       retentionHours,
-    } = body;
+    } = parsed.data;
+
+    // Every other webhook URL entry point (webhook-test, the v1 render APIs)
+    // is checked against the SSRF guard before use — this one wasn't, even
+    // though nothing currently reads projects.webhookUrl back out for
+    // delivery. Guard it now so it can't become a live SSRF the moment it
+    // does get wired into a delivery path.
+    if (webhookUrl && !(await isUrlSafe(webhookUrl))) {
+      return NextResponse.json(
+        { error: "webhookUrl must be a public http(s) URL" },
+        { status: 400 }
+      );
+    }
 
     const updateData: Record<string, any> = {
       webhookUrl: webhookUrl || null,
@@ -56,9 +76,9 @@ export async function PUT(request: Request) {
     };
 
     if (defaultFormat !== undefined) updateData.defaultFormat = defaultFormat;
-    if (defaultQuality !== undefined) updateData.defaultQuality = Number(defaultQuality);
-    if (defaultScale !== undefined) updateData.defaultScale = Number(defaultScale);
-    if (retentionHours !== undefined) updateData.retentionHours = Number(retentionHours);
+    if (defaultQuality !== undefined) updateData.defaultQuality = defaultQuality;
+    if (defaultScale !== undefined) updateData.defaultScale = defaultScale;
+    if (retentionHours !== undefined) updateData.retentionHours = retentionHours;
 
     await db
       .update(projects)

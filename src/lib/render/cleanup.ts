@@ -6,7 +6,7 @@
  */
 import { db } from "@/db";
 import { renderJobs, projects } from "@/db/schema";
-import { lt, and, isNotNull, eq } from "drizzle-orm";
+import { lt, and, isNotNull, eq, inArray } from "drizzle-orm";
 import { deleteFile } from "@/lib/storage";
 
 const DEFAULT_RETENTION_HOURS = 24;
@@ -31,7 +31,7 @@ export async function cleanupOldRenders(
 
   // Find the matching jobs (so we can remove their files first).
   const oldJobs = await db
-    .select({ imageUrl: renderJobs.imageUrl })
+    .select({ id: renderJobs.id, imageUrl: renderJobs.imageUrl })
     .from(renderJobs)
     .where(where);
 
@@ -51,7 +51,18 @@ export async function cleanupOldRenders(
     }
   }
 
-  await db.delete(renderJobs).where(where);
+  // Delete by the exact IDs just processed, not by re-running the
+  // time-based `where` — a job that matched createdAt < cutoff but was
+  // still incomplete (excluded above by isNotNull(completedAt)) can finish
+  // during the file-deletion loop above and start matching `where` by now,
+  // which would delete its DB row here without ever having deleted its
+  // file above, orphaning it on disk permanently.
+  await db.delete(renderJobs).where(
+    inArray(
+      renderJobs.id,
+      oldJobs.map((j) => j.id)
+    )
+  );
 
   const deleted = oldJobs.length;
   console.log(

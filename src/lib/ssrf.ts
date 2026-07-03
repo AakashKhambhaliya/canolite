@@ -49,6 +49,38 @@ function isPrivateV6(ip: string): boolean {
   return false;
 }
 
+const MAX_REDIRECTS = 5;
+
+/**
+ * fetch() with the SSRF guard applied to *every* hop of a redirect chain, not
+ * just the caller-supplied URL. `fetch(url, { redirect: "follow" })` (or the
+ * default) follows redirects itself without re-checking each destination —
+ * so a URL that passes isUrlSafe() can still respond with e.g.
+ * `302 Location: http://169.254.169.254/...` and the guard never sees the
+ * real destination. This fetches with `redirect: "manual"` and validates
+ * each Location before following it.
+ */
+export async function safeFetch(
+  url: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    if (!(await isUrlSafe(current))) {
+      throw new Error(`URL is not allowed: ${current}`);
+    }
+    const res = await fetch(current, { ...init, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) return res; // redirect with no Location — nothing to follow
+      current = new URL(location, current).toString();
+      continue;
+    }
+    return res;
+  }
+  throw new Error(`Too many redirects fetching ${url}`);
+}
+
 export async function isUrlSafe(raw: string): Promise<boolean> {
   let url: URL;
   try {
