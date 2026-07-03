@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -74,6 +74,12 @@ import {
   Lock,
   Unlock,
   Maximize2,
+  AlignStartVertical,
+  AlignCenterVertical,
+  AlignEndVertical,
+  AlignStartHorizontal,
+  AlignCenterHorizontal,
+  AlignEndHorizontal,
 } from "lucide-react";
 
 // We'll store the fabric module reference once loaded
@@ -117,6 +123,17 @@ export default function EditorPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
+  // Set by the Alt+wheel handler right before it changes `zoom`, so the zoom
+  // effect (which actually resizes the canvas) knows which on-canvas point was
+  // under the cursor and can correct scroll to keep it there. Null means the
+  // pending zoom change (if any) didn't come from the wheel — e.g. slider/
+  // buttons — so scroll should be left alone.
+  const wheelZoomAnchorRef = useRef<{
+    clientX: number;
+    clientY: number;
+    fracX: number;
+    fracY: number;
+  } | null>(null);
   // True once the canvas has been initialized for the current mount. Prevents
   // background refetches / cache updates from re-initializing (and wiping) the
   // live canvas. Reset on unmount so each (re)open initializes cleanly.
@@ -125,15 +142,16 @@ export default function EditorPage() {
   const loadingRef = useRef(false);
 
   const [selectedObject, setSelectedObject] = useState<any>(null);
-  const [zoom, setZoom] = useState(70);
-  // Lowest zoom the user can reach. Computed relative to the canvas size vs the
-  // workspace viewport so a large template can always be zoomed out far enough
-  // to fit on screen (a fixed floor stranded big canvases — they couldn't shrink
-  // enough to be fully visible). Capped at 20 so small canvases keep the old feel.
-  const [minZoom, setMinZoom] = useState(20);
-  // Tracks which template id has already been auto-fitted, so we only shrink an
-  // oversized canvas to fit on first open — never fighting the user afterwards.
-  const fittedTemplateRef = useRef<string | null>(null);
+  // `zoom` is a percentage of "fit" (100 = whole canvas visible), not of the
+  // template's native pixel size — see the zoom-apply effect below. That way
+  // the same displayed number, range, and per-click step mean the same thing
+  // regardless of the template's actual pixel dimensions.
+  const [zoom, setZoom] = useState(100);
+  // The native "% of actual pixel size" zoom that makes the whole template
+  // fit inside the workspace viewport. Recomputed on resize; this is the
+  // conversion factor between the displayed fit-relative `zoom` and the
+  // native fraction Fabric's canvas actually renders at.
+  const [fitPct, setFitPct] = useState(20);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(true);
   const [editingName, setEditingName] = useState(false);
@@ -159,6 +177,8 @@ export default function EditorPage() {
   // JSON snapshots. Pushed on every add/modify/remove; restored on undo/redo.
   const HISTORY_LIMIT = 80;
   const HISTORY_PROPS = ["name", "dynamic", "id", "selectable", "evented"];
+  const MIN_ZOOM_PCT = 10; // 10% of fit
+  const MAX_ZOOM_PCT = 800; // 8x fit
   const historyRef = useRef<{
     stack: string[];
     index: number;
@@ -367,6 +387,67 @@ export default function EditorPage() {
     canvas.fire("object:modified", { target: active });
   }, []);
 
+  // Align every object in the current multi-selection to an edge/center of
+  // their shared bounding box (the standard design-tool meaning of "align").
+  // `getBoundingRect()` returns absolute canvas coordinates even for objects
+  // nested in the active selection, and `setXY` takes an absolute point and
+  // converts it back to the selection-relative coordinates Fabric stores
+  // internally — so this works without hand-rolling that conversion.
+  const alignSelected = useCallback(
+    (mode: "left" | "centerH" | "right" | "top" | "middle" | "bottom") => {
+      const canvas = fabricCanvasRef.current;
+      const active = canvas?.getActiveObject();
+      // Fabric's runtime type string for a multi-selection is the all-lowercase
+      // "activeselection" (only the classRegistry key is camelCased), so match
+      // case-insensitively rather than assuming "activeSelection".
+      if (
+        !canvas ||
+        !fabricModule ||
+        !active ||
+        (active.type || "").toLowerCase() !== "activeselection"
+      )
+        return;
+      const objects: any[] = active.getObjects();
+      if (objects.length < 2) return;
+
+      const sel = active.getBoundingRect();
+
+      for (const obj of objects) {
+        const bounds = obj.getBoundingRect();
+        let dx = 0;
+        let dy = 0;
+        if (mode === "left") dx = sel.left - bounds.left;
+        else if (mode === "centerH")
+          dx = sel.left + sel.width / 2 - (bounds.left + bounds.width / 2);
+        else if (mode === "right")
+          dx = sel.left + sel.width - (bounds.left + bounds.width);
+        else if (mode === "top") dy = sel.top - bounds.top;
+        else if (mode === "middle")
+          dy = sel.top + sel.height / 2 - (bounds.top + bounds.height / 2);
+        else if (mode === "bottom")
+          dy = sel.top + sel.height - (bounds.top + bounds.height);
+
+        if (dx || dy) {
+          const p = obj.getXY();
+          obj.setXY(new fabricModule.Point(p.x + dx, p.y + dy));
+          obj.setCoords();
+        }
+      }
+
+      // An ActiveSelection never re-derives its own bounding box when its
+      // children move (by design, so dragging one member out of a selection
+      // that came from an interactive group doesn't relayout that group) —
+      // so its outline/handles would keep showing the pre-alignment box.
+      // Discard and reselect the same objects to force a fresh one.
+      canvas.discardActiveObject();
+      const fresh = new fabricModule.ActiveSelection(objects, { canvas });
+      canvas.setActiveObject(fresh);
+      canvas.requestRenderAll();
+      canvas.fire("object:modified", { target: fresh });
+    },
+    []
+  );
+
   // Initialize Fabric canvas — once per mount, from the loaded template.
   useEffect(() => {
     if (!canvasRef.current || !template || initializedRef.current) return;
@@ -518,20 +599,122 @@ export default function EditorPage() {
   // caret) and shrinks the selection control handles along with everything else.
   // Native zoom keeps the design's logical coordinates intact while resizing the
   // on-screen canvas, so editing and the handles stay correct at any zoom.
-  useEffect(() => {
+  // `zoom` is fit-relative (100 = whole canvas visible), so the actual native
+  // fraction passed to Fabric is `zoom` scaled by `fitPct`.
+  // useLayoutEffect (not useEffect) so a pointer-anchored zoom (see the wheel
+  // handler below) corrects scroll before paint — otherwise the canvas would
+  // visibly jump to re-centered scroll for a frame before snapping back under
+  // the cursor.
+  useLayoutEffect(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !canvasReady) return;
-    const z = zoom / 100;
+    const z = (zoom / 100) * (fitPct / 100);
     const w = template?.width || 1080;
     const h = template?.height || 1350;
     canvas.setZoom(z);
     canvas.setDimensions({ width: w * z, height: h * z });
     canvas.requestRenderAll();
-  }, [zoom, canvasReady, template?.width, template?.height]);
 
-  // The zoom % that makes the whole template fit inside the workspace viewport
-  // (accounting for the p-16 = 64px padding on each side). Rounded down to the
-  // slider's 5% step, with a hard 5% floor for sanity on huge canvases.
+    const ws = workspaceRef.current;
+    const wrapperEl = canvas.wrapperEl as HTMLElement | undefined;
+
+    // If this change came from the wheel handler, it recorded which point on
+    // the canvas was under the cursor. Re-measure that point now that the
+    // resize above has been applied, and correct scroll so it lands back
+    // under the cursor instead of the viewport re-centering on the canvas.
+    // Otherwise (slider, +/- buttons, fit button) there's no cursor to anchor
+    // to, so re-center the canvas — without this, zooming out via those
+    // controls after a wheel-zoom left the view scrolled deep into the
+    // canvas, so shrinking it back down (e.g. hitting "fit") left the now-
+    // small canvas stranded in a corner instead of fully visible.
+    const anchor = wheelZoomAnchorRef.current;
+    if (anchor && ws && wrapperEl) {
+      wheelZoomAnchorRef.current = null;
+      const rect = wrapperEl.getBoundingClientRect();
+      ws.scrollLeft += rect.left + anchor.fracX * rect.width - anchor.clientX;
+      ws.scrollTop += rect.top + anchor.fracY * rect.height - anchor.clientY;
+    } else if (ws) {
+      ws.scrollLeft = (ws.scrollWidth - ws.clientWidth) / 2;
+      ws.scrollTop = (ws.scrollHeight - ws.clientHeight) / 2;
+    }
+  }, [zoom, fitPct, canvasReady, template?.width, template?.height]);
+
+  // Clicking anywhere in the workspace that isn't the canvas itself — the
+  // surrounding scrollable background, or the padding around the canvas —
+  // deselects whatever's active. Fabric only clears selection for empty
+  // space it renders itself (inside the canvas); clicks that land outside
+  // its DOM element entirely aren't seen by it at all.
+  useEffect(() => {
+    const ws = workspaceRef.current;
+    if (!ws || !canvasReady) return;
+
+    const handleMouseDown = (e: MouseEvent) => {
+      const canvas = fabricCanvasRef.current;
+      const wrapperEl = canvas?.wrapperEl as HTMLElement | undefined;
+      if (!canvas || !wrapperEl) return;
+      if (wrapperEl.contains(e.target as Node)) return;
+      if (canvas.getActiveObject()) {
+        canvas.discardActiveObject();
+        canvas.requestRenderAll();
+      }
+    };
+
+    ws.addEventListener("mousedown", handleMouseDown);
+    return () => ws.removeEventListener("mousedown", handleMouseDown);
+  }, [canvasReady]);
+
+  // Alt + mouse-wheel zoom, anchored to the cursor (the standard behavior in
+  // design tools like Figma). Reads/writes Fabric's live zoom directly rather
+  // than the React `zoom` state so rapid wheel ticks always compound on the
+  // latest value instead of a stale render's closure.
+  useEffect(() => {
+    const ws = workspaceRef.current;
+    if (!ws || !canvasReady) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.altKey) return;
+      // Non-passive listener (see addEventListener below) so this actually
+      // suppresses the browser's own default for Alt+wheel (e.g. Firefox's
+      // back/forward history navigation) instead of just being ignored.
+      e.preventDefault();
+      const canvas = fabricCanvasRef.current;
+      const wrapperEl = canvas?.wrapperEl as HTMLElement | undefined;
+      if (!canvas || !wrapperEl) return;
+
+      const rect = wrapperEl.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+
+      // Convert Fabric's live native zoom back to the displayed, fit-relative
+      // percentage before applying the wheel delta to it.
+      const curPct = (canvas.getZoom() * 10000) / fitPct;
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      const nextPct = Math.min(
+        MAX_ZOOM_PCT,
+        Math.max(MIN_ZOOM_PCT, curPct * factor)
+      );
+      if (Math.abs(nextPct - curPct) < 0.01) return;
+
+      // Fraction of the canvas's current on-screen box under the cursor —
+      // deliberately not clamped to [0, 1]. Hovering just outside the canvas
+      // still anchors correctly since the same linear mapping extrapolates.
+      wheelZoomAnchorRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        fracX: (e.clientX - rect.left) / rect.width,
+        fracY: (e.clientY - rect.top) / rect.height,
+      };
+      setZoom(nextPct);
+    };
+
+    ws.addEventListener("wheel", handleWheel, { passive: false });
+    return () => ws.removeEventListener("wheel", handleWheel);
+  }, [canvasReady, fitPct]);
+
+  // The native "% of actual pixel size" zoom that makes the whole template
+  // fit inside the workspace viewport (accounting for the p-16 = 64px padding
+  // on each side). This is `fitPct` — the conversion factor for the displayed
+  // fit-relative `zoom` above, so "100%" always means "whole canvas visible"
+  // no matter the template's actual pixel dimensions.
   const computeFitZoom = useCallback(() => {
     const ws = workspaceRef.current;
     const w = template?.width || 1080;
@@ -539,19 +722,16 @@ export default function EditorPage() {
     const availW = (ws?.clientWidth || 800) - 128;
     const availH = (ws?.clientHeight || 600) - 128;
     const fit = Math.min(availW / w, availH / h) * 100;
-    return Math.max(5, Math.floor(fit / 5) * 5);
+    return Math.max(1, fit);
   }, [template?.width, template?.height]);
 
-  // Keep the zoom floor relative to the canvas/viewport, and re-derive it when
-  // the workspace resizes (window resize, sidebar toggles, etc.). Clamp the
-  // current zoom up if it ends up below the new floor.
+  // Re-derive `fitPct` whenever the workspace resizes (window resize, sidebar
+  // toggles, etc.) or the template changes, so a given `zoom` percentage keeps
+  // meaning the same thing on screen instead of drifting when the available
+  // space changes.
   useEffect(() => {
     if (!canvasReady) return;
-    const recompute = () => {
-      const floor = Math.max(5, Math.min(20, computeFitZoom()));
-      setMinZoom(floor);
-      setZoom((z) => (z < floor ? floor : z));
-    };
+    const recompute = () => setFitPct(computeFitZoom());
     recompute();
     const ws = workspaceRef.current;
     if (!ws || typeof ResizeObserver === "undefined") return;
@@ -560,16 +740,16 @@ export default function EditorPage() {
     return () => ro.disconnect();
   }, [canvasReady, computeFitZoom]);
 
-  // On first open of a template, fit a *genuinely oversized* canvas — one that
-  // can't be made to fit within the old fixed 20% floor. Normal templates keep
-  // their default zoom so this doesn't change everyday behavior.
+  // Reset to "fit" whenever a different template is opened — `zoom` is state
+  // on this component, which stays mounted across in-app template navigation
+  // and would otherwise carry over the previous template's zoom level.
+  const zoomedTemplateRef = useRef<string | null>(null);
   useEffect(() => {
     if (!canvasReady || !template?.id) return;
-    if (fittedTemplateRef.current === template.id) return;
-    fittedTemplateRef.current = template.id;
-    const fit = computeFitZoom();
-    if (fit < 20) setZoom(fit);
-  }, [canvasReady, template?.id, computeFitZoom]);
+    if (zoomedTemplateRef.current === template.id) return;
+    zoomedTemplateRef.current = template.id;
+    setZoom(100);
+  }, [canvasReady, template?.id]);
 
   // Save handler
   const handleSave = useCallback(() => {
@@ -876,7 +1056,7 @@ export default function EditorPage() {
     // Otherwise the export would come out at the on-screen (zoomed) size.
     const w = template?.width || 1080;
     const h = template?.height || 1350;
-    const z = zoom / 100;
+    const z = (zoom / 100) * (fitPct / 100);
     canvas.setZoom(1);
     canvas.setDimensions({ width: w, height: h });
     canvas.renderAll();
@@ -914,7 +1094,7 @@ export default function EditorPage() {
     }
     setExportOpen(false);
     toast.success(`Exported as ${exportFormat.toUpperCase()}`);
-  }, [templateName, exportFormat, exportQuality, exportScale, zoom, template?.width, template?.height]);
+  }, [templateName, exportFormat, exportQuality, exportScale, zoom, fitPct, template?.width, template?.height]);
 
   // Update selected object property
   const updateProp = useCallback(
@@ -1070,6 +1250,20 @@ export default function EditorPage() {
     objType === "ellipse" ||
     objType === "polygon" ||
     objType === "line";
+  const isMultiSelect = objType === "activeselection";
+
+  const alignButtons: Array<{
+    mode: "left" | "centerH" | "right" | "top" | "middle" | "bottom";
+    icon: typeof AlignStartVertical;
+    label: string;
+  }> = [
+    { mode: "left", icon: AlignStartVertical, label: "Align left" },
+    { mode: "centerH", icon: AlignCenterVertical, label: "Align center" },
+    { mode: "right", icon: AlignEndVertical, label: "Align right" },
+    { mode: "top", icon: AlignStartHorizontal, label: "Align top" },
+    { mode: "middle", icon: AlignCenterHorizontal, label: "Align middle" },
+    { mode: "bottom", icon: AlignEndHorizontal, label: "Align bottom" },
+  ];
 
   return (
     <>
@@ -1470,15 +1664,11 @@ export default function EditorPage() {
           </div>
 
           {/* ==================== CANVAS WORKSPACE ==================== */}
-          <div ref={workspaceRef} className="flex-1 overflow-auto bg-[#0f1115] relative">
-            <div
-              className="absolute inset-0 opacity-20 pointer-events-none"
-              style={{
-                backgroundImage:
-                  "radial-gradient(circle, rgba(255,255,255,0.12) 1px, transparent 1px)",
-                backgroundSize: "24px 24px",
-              }}
-            />
+          <div
+            ref={workspaceRef}
+            className="flex-1 overflow-auto bg-[#0f1115] relative"
+            style={{ overflowAnchor: "none" }}
+          >
             <div className="min-h-full flex items-center justify-center p-16">
               {/* Zoom is applied via Fabric's viewport (see the zoom effect),
                   so the canvas element itself is already sized for the zoom —
@@ -1500,7 +1690,7 @@ export default function EditorPage() {
                   </h3>
                   {activeObj && (
                     <span className="text-[10px] text-[#8b919c] font-mono">
-                      {objType}
+                      {isMultiSelect ? "multiple" : objType}
                     </span>
                   )}
                 </div>
@@ -1512,6 +1702,33 @@ export default function EditorPage() {
                     <p className="text-xs text-[#8b919c] text-center py-8">
                       Select a layer to edit properties
                     </p>
+                  ) : isMultiSelect ? (
+                    <>
+                      <p className="text-[11px] text-[#8b919c]">
+                        {activeObj.getObjects().length} objects selected
+                      </p>
+
+                      <div className="space-y-1.5">
+                        <Label className="text-[11px] text-[#c4c9d2]">
+                          Align
+                        </Label>
+                        <div className="grid grid-cols-3 gap-1">
+                          {alignButtons.map(({ mode, icon: Icon, label }) => (
+                            <Tooltip key={mode}>
+                              <TooltipTrigger asChild>
+                                <button
+                                  onClick={() => alignSelected(mode)}
+                                  className="h-8 rounded-md flex items-center justify-center bg-[#1f232a] text-[#c4c9d2] hover:bg-[#23262c] hover:text-[#e6e8ec] transition-colors"
+                                >
+                                  <Icon className="h-4 w-4" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent>{label}</TooltipContent>
+                            </Tooltip>
+                          ))}
+                        </div>
+                      </div>
+                    </>
                   ) : (
                     <>
                       {/* Field name */}
@@ -2048,7 +2265,7 @@ export default function EditorPage() {
                 variant="ghost"
                 size="icon-sm"
                 className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec]"
-                onClick={() => setZoom(Math.max(minZoom, zoom - 10))}
+                onClick={() => setZoom(Math.max(MIN_ZOOM_PCT, zoom - 10))}
               >
                 <Minus className="h-3 w-3" />
               </Button>
@@ -2059,14 +2276,14 @@ export default function EditorPage() {
           <Slider
             value={[zoom]}
             onValueChange={([v]) => setZoom(v)}
-            min={minZoom}
-            max={200}
+            min={MIN_ZOOM_PCT}
+            max={MAX_ZOOM_PCT}
             step={5}
             className="w-28"
           />
 
           <span className="text-[11px] text-[#8b919c] font-mono w-10">
-            {zoom}%
+            {Math.round(zoom)}%
           </span>
 
           <Tooltip>
@@ -2075,7 +2292,7 @@ export default function EditorPage() {
                 variant="ghost"
                 size="icon-sm"
                 className="h-6 w-6 text-[#8b919c] hover:text-[#e6e8ec]"
-                onClick={() => setZoom(computeFitZoom())}
+                onClick={() => setZoom(100)}
               >
                 <Maximize2 className="h-3 w-3" />
               </Button>

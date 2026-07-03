@@ -70,19 +70,39 @@ async function getFabricSource(): Promise<string> {
 }
 
 // Reuse a single Chromium instance across renders (cached over HMR).
-const globalForBrowser = globalThis as unknown as { __canoliteBrowser?: Browser };
+const globalForBrowser = globalThis as unknown as {
+  __canoliteBrowser?: Browser;
+  __canoliteBrowserPromise?: Promise<Browser>;
+};
 
 async function getBrowser(): Promise<Browser> {
   if (globalForBrowser.__canoliteBrowser?.isConnected()) {
     return globalForBrowser.__canoliteBrowser;
   }
-  const { chromium } = await import("playwright");
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-  });
-  globalForBrowser.__canoliteBrowser = browser;
-  return browser;
+  // Cache the in-flight launch *promise* synchronously (before the first
+  // `await`), not just the resolved browser — otherwise two renders arriving
+  // concurrently during a cold start (or right after the cached browser
+  // dies) both see no browser cached and both launch their own Chromium
+  // instance; the second assignment below would silently orphan the first
+  // browser's process (never closed, never referenced again). Mirrors
+  // ensureDb()'s pattern in src/db/index.ts.
+  if (!globalForBrowser.__canoliteBrowserPromise) {
+    globalForBrowser.__canoliteBrowserPromise = (async () => {
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+      });
+      globalForBrowser.__canoliteBrowser = browser;
+      return browser;
+    })().finally(() => {
+      // Clear once settled: on success, future calls take the fast path
+      // above via __canoliteBrowser; on failure, this lets the next call
+      // retry the launch instead of permanently reusing a rejected promise.
+      globalForBrowser.__canoliteBrowserPromise = undefined;
+    });
+  }
+  return globalForBrowser.__canoliteBrowserPromise;
 }
 
 export interface RenderOptions {

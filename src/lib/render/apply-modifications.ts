@@ -109,8 +109,12 @@ export function applyModifications(
   const warnings: string[] = [];
   const fonts = availableFonts || BUNDLED_FONTS;
 
-  // Deep clone to avoid mutation
-  const json = JSON.parse(JSON.stringify(designJson));
+  // Deep clone to avoid mutation. A template can have designJson: null (no
+  // NOT NULL constraint on the column, and the templates PUT route accepts
+  // it as-is) — JSON.parse(JSON.stringify(null)) is null, and `null.objects`
+  // below would throw before the `|| []` fallback ever applies, so fall back
+  // to an empty design up front instead.
+  const json = JSON.parse(JSON.stringify(designJson)) || { objects: [] };
 
   if (!modifications || modifications.length === 0) {
     return { modifiedJson: json, warnings };

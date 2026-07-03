@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { isUrlSafe } from "@/lib/ssrf";
+import { isUrlSafe, safeFetch } from "@/lib/ssrf";
 
 const WEBHOOK_TIMEOUT_MS = 10_000;
 
@@ -43,7 +43,10 @@ export async function POST(request: Request) {
     const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
     let response: Response;
     try {
-      response = await fetch(webhookUrl, {
+      // safeFetch re-checks every redirect hop — the isUrlSafe() call above
+      // only validated the URL the user typed in, not wherever it might
+      // redirect to.
+      response = await safeFetch(webhookUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

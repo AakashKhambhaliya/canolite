@@ -50,5 +50,19 @@ export const batchRequestSchema = z.object({
   scale: z.number().min(1).max(3).optional(),
 });
 
+export const settingsSchema = z.object({
+  // Empty string means "clear the field" (matches the settings form's
+  // behavior); z.coerce.number() both accepts a proper number as-is and
+  // rejects garbage (non-numeric strings, NaN) instead of silently letting
+  // it through the way a bare `Number(x)` in the route handler used to.
+  webhookUrl: z.union([z.string().url(), z.literal("")]).optional(),
+  webhookSecret: z.string().optional(),
+  defaultFormat: z.enum(["png", "jpg", "jpeg", "webp"]).optional(),
+  defaultQuality: z.coerce.number().min(1).max(100).optional(),
+  defaultScale: z.coerce.number().min(1).max(3).optional(),
+  retentionHours: z.coerce.number().min(1).max(8760).optional(),
+});
+
 export type RenderRequest = z.infer<typeof renderRequestSchema>;
 export type BatchRequest = z.infer<typeof batchRequestSchema>;
+export type SettingsRequest = z.infer<typeof settingsSchema>;

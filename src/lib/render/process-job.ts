@@ -14,6 +14,7 @@ import { applyModifications } from "./apply-modifications";
 import { inlineExternalImages } from "./inline-images";
 import { renderToBuffer } from "./render-image";
 import { uploadFile, toAbsoluteUrl } from "@/lib/storage";
+import { safeFetch } from "@/lib/ssrf";
 
 const WEBHOOK_TIMEOUT_MS = 10_000;
 
@@ -91,7 +92,10 @@ export async function processRenderJob(
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
       try {
-        await fetch(job.webhookUrl, {
+        // safeFetch re-validates every redirect hop against the SSRF guard —
+        // job.webhookUrl was checked at creation time, but a plain fetch()
+        // would still follow a same-URL redirect to an internal address.
+        await safeFetch(job.webhookUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
