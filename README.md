@@ -47,7 +47,7 @@ Hosting on **Coolify**, **Dokploy**, or want manual Docker/VPS steps? See
 
 ### Local development
 
-**Requirements:** Node.js **20+** (Next.js 15). No Docker needed.
+**Requirements:** Node.js **22+** (Next.js 15). No Docker needed.
 
 ```bash
 git clone https://github.com/AakashKhambhaliya/canolite.git
