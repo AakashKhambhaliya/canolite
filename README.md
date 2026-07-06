@@ -4,6 +4,8 @@
 
 ![Next.js](https://img.shields.io/badge/Next.js-15-black) ![React](https://img.shields.io/badge/React-19-blue) ![Fabric.js](https://img.shields.io/badge/Fabric.js-6-orange) ![License](https://img.shields.io/badge/License-MIT-green)
 
+> ⚡ **Use it in [n8n](https://n8n.io)** — generate images from your automation workflows with the official community node. In n8n go to **Settings → Community Nodes → Install** and enter [`n8n-nodes-canolite`](https://www.npmjs.com/package/n8n-nodes-canolite). [See setup ↓](#n8n)
+
 ---
 
 ## Features
