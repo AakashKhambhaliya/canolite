@@ -4,12 +4,15 @@
 
 ![Next.js](https://img.shields.io/badge/Next.js-15-black) ![React](https://img.shields.io/badge/React-19-blue) ![Fabric.js](https://img.shields.io/badge/Fabric.js-6-orange) ![License](https://img.shields.io/badge/License-MIT-green)
 
+> ⚡ **Use it in [n8n](https://n8n.io)** — generate images from your automation workflows with the official community node. In n8n go to **Settings → Community Nodes → Install** and enter [`n8n-nodes-canolite`](https://www.npmjs.com/package/n8n-nodes-canolite). [See setup ↓](#n8n)
+
 ---
 
 ## Features
 
 - 🎨 **Visual Template Editor** — Fabric.js drag-and-drop editor with text, images, shapes, **layer reordering**, **alignment/snapping guides**, **all Google Fonts + custom font upload**
 - 🔗 **REST API** — Bannerbear-style API for single and batch image generation
+- 🔌 **n8n integration** — Official [community node](https://www.npmjs.com/package/n8n-nodes-canolite) to generate images from your automation workflows
 - 📊 **Bulk CSV Import** — Upload a spreadsheet to generate hundreds of images at once
 - 🔑 **API Key Management** — Create/revoke keys with secure hashing (shown once)
 - 🎯 **Playground** — Interactive template testing with live API request preview
@@ -191,6 +194,43 @@ POST /v1/images/batch
 GET /v1/templates
 GET /v1/templates/:template_id
 ```
+
+---
+
+## Integrations
+
+### n8n
+
+Automate image generation from [n8n](https://n8n.io) workflows using the official
+community node — [**n8n-nodes-canolite**](https://www.npmjs.com/package/n8n-nodes-canolite)
+([source](https://github.com/AakashKhambhaliya/n8n-nodes-canolite)).
+
+**Install**
+
+1. In n8n, go to **Settings → Community Nodes → Install**.
+2. Enter `n8n-nodes-canolite` and confirm.
+3. Add the **Canolite** node to any workflow.
+
+**Connect (credentials)**
+
+Create a **Canolite API** credential in n8n with:
+
+| Field    | Value                                             |
+|----------|---------------------------------------------------|
+| Base URL | Your Canolite instance URL (e.g. `http://localhost:3000`) |
+| API Key  | A key from the dashboard under **API Keys** (`sk_live_…`) |
+
+**What you can do**
+
+- **Image → Generate / Generate (Sync)** — render a single image. Pick a **Template ID**
+  and the node loads that template's editable objects into a dropdown; each object shows
+  just the field it needs (text or image URL). Sync returns the `image_url` directly;
+  async can **Wait for Completion** and poll until the render is done.
+- **Image → Batch Generate** — render many images from one template in a single request.
+- **Image → Get Status** — check a render job by UID.
+- **Template → Get / Get Many** — list or fetch templates.
+
+> Requires Canolite **API v1** and n8n **1.0+**.
 
 ---
 
