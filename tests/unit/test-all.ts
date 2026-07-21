@@ -585,6 +585,56 @@ async function renderFontTests() {
   assert(!head.includes("Arial"), "a family with no custom font gets no @font-face");
 }
 
+// =============================================================
+// 9. Template thumbnails
+// =============================================================
+console.log("\n9. Template thumbnails\n");
+
+import {
+  thumbnailKey,
+  thumbnailScale,
+  THUMBNAIL_MAX_EDGE,
+} from "../../src/lib/render/thumbnail";
+
+{
+  // The key carries updatedAt so editing a template produces a new URL —
+  // a stale preview can never survive in the browser cache.
+  assertEqual(
+    thumbnailKey("a1b2c3", new Date(1700000000000)),
+    "thumbnails/a1b2c3-1700000000000.webp",
+    "thumbnail key is thumbnails/<id>-<epochMs>.webp"
+  );
+
+  assert(
+    thumbnailKey("a1b2c3", new Date(1700000000000)) !==
+      thumbnailKey("a1b2c3", new Date(1700000000001)),
+    "key changes when updatedAt changes"
+  );
+
+  // Longest edge lands exactly on the target, whatever the orientation.
+  assertEqual(
+    Math.round(1080 * thumbnailScale(1080, 1080)),
+    THUMBNAIL_MAX_EDGE,
+    "square 1080x1080 scales to a 400px longest edge"
+  );
+  assertEqual(
+    Math.round(2752 * thumbnailScale(1536, 2752)),
+    THUMBNAIL_MAX_EDGE,
+    "portrait 1536x2752 scales to a 400px longest edge"
+  );
+  assertEqual(
+    Math.round(1920 * thumbnailScale(1920, 1080)),
+    THUMBNAIL_MAX_EDGE,
+    "landscape 1920x1080 scales to a 400px longest edge"
+  );
+
+  assertEqual(
+    thumbnailScale(200, 200),
+    1,
+    "a template smaller than the target is never upscaled"
+  );
+}
+
 
 // =============================================================
 // RESULTS
