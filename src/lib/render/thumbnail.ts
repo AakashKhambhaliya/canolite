@@ -6,7 +6,7 @@
  */
 import { db } from "@/db";
 import { templates } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, and, isNull } from "drizzle-orm";
 import { prepareDesignForRender } from "./prepare-design";
 import { renderToBuffer } from "./render-image";
 import { uploadFile } from "@/lib/storage";
@@ -99,4 +99,31 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
 
   inflight.set(templateRowId, p);
   return p;
+}
+
+/**
+ * Generate thumbnails for every template that lacks one.
+ *
+ * Runs at boot so templates created before thumbnails existed (or whose
+ * generation previously failed) get one with no manual step. Serial on purpose:
+ * each thumbnail is a headless Chromium render, and a parallel sweep over a
+ * large library would starve request handling.
+ */
+export async function backfillThumbnails(): Promise<void> {
+  const rows = await db
+    .select({ id: templates.id })
+    .from(templates)
+    .where(and(isNull(templates.thumbnailUrl), eq(templates.isDeleted, false)));
+
+  if (rows.length === 0) return;
+
+  console.log(`[thumbnail] Backfilling ${rows.length} template(s)…`);
+  let done = 0;
+  for (const row of rows) {
+    // generateThumbnail never rejects, but guard anyway so one bad template
+    // can't abort the sweep.
+    await generateThumbnail(row.id).catch(() => {});
+    done++;
+  }
+  console.log(`[thumbnail] Backfill complete (${done}/${rows.length}).`);
 }
