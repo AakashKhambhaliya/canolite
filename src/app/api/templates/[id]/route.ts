@@ -4,6 +4,8 @@ import { templates, templateFields } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { extractFields } from "@/lib/render/apply-modifications";
+import { generateThumbnail } from "@/lib/render/thumbnail";
+import { deleteFile } from "@/lib/storage";
 
 export async function GET(
   request: Request,
@@ -72,6 +74,25 @@ export async function PUT(
     if (designJson !== undefined) updateData.designJson = designJson;
     if (outputDefaults !== undefined) updateData.outputDefaults = outputDefaults;
 
+    const designChanged =
+      designJson !== undefined || width !== undefined || height !== undefined;
+
+    // A stale preview must not outlive the design it depicts. Null the column
+    // now; the regeneration below repoints it at the new file.
+    if (designChanged) updateData.thumbnailUrl = null;
+
+    const [existing] = await db
+      .select({ thumbnailUrl: templates.thumbnailUrl })
+      .from(templates)
+      .where(
+        and(
+          eq(templates.id, id),
+          eq(templates.projectId, user.projectId),
+          eq(templates.isDeleted, false)
+        )
+      )
+      .limit(1);
+
     const [template] = await db
       .update(templates)
       .set(updateData)
@@ -89,6 +110,15 @@ export async function PUT(
         { error: "Template not found" },
         { status: 404 }
       );
+    }
+
+    if (designChanged) {
+      // Remove the superseded file. Best-effort — deleteFile ignores misses.
+      const previous = existing?.thumbnailUrl;
+      if (previous?.startsWith("/storage/")) {
+        void deleteFile(previous.replace(/^\/storage\//, ""));
+      }
+      void generateThumbnail(template.id);
     }
 
     // Regenerate template_fields from design_json

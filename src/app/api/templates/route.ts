@@ -4,6 +4,7 @@ import { templates, templateFields } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { generateId } from "@/lib/utils";
+import { generateThumbnail } from "@/lib/render/thumbnail";
 
 export async function GET() {
   try {
@@ -64,6 +65,10 @@ export async function POST(request: Request) {
         outputDefaults: { format: "png", quality: 90, scale: 1 },
       })
       .returning();
+
+    // Fire-and-forget: a render takes seconds and must not delay the response.
+    // On failure the column stays NULL and the next boot sweep retries.
+    void generateThumbnail(template.id);
 
     return NextResponse.json(template, { status: 201 });
   } catch (error) {
