@@ -8,11 +8,10 @@
  * (errors are recorded on the job row) unless `rethrow` is set.
  */
 import { db } from "@/db";
-import { renderJobs, templates, assets } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { renderJobs, templates } from "@/db/schema";
+import { eq } from "drizzle-orm";
 import { applyModifications } from "./apply-modifications";
-import { inlineExternalImages } from "./inline-images";
-import { inlineFontSources } from "./inline-fonts";
+import { prepareDesignForRender } from "./prepare-design";
 import { renderToBuffer } from "./render-image";
 import { uploadFile, toAbsoluteUrl } from "@/lib/storage";
 import { safeFetch } from "@/lib/ssrf";
@@ -50,25 +49,11 @@ export async function processRenderJob(
       (job.modifications as any) || []
     );
 
-    // Fetch external image URLs server-side and inline them as data: URLs.
-    // The headless render page can't reliably load arbitrary external URLs
-    // (CORS, hotlink protection, redirects like Google Drive share links).
-    const renderJson = await inlineExternalImages(modifiedJson);
-
-    // Project's uploaded custom fonts, so server renders match the editor.
-    const fontAssets = await db
-      .select()
-      .from(assets)
-      .where(
-        and(eq(assets.projectId, job.projectId), eq(assets.type, "font"))
-      );
-    // The render page's opaque origin blocks CORS-mode font fetches, so the
-    // bytes have to travel inline — see inline-fonts.ts.
-    const customFonts = await inlineFontSources(
-      fontAssets.map((a: any) => ({
-        family: a.name.replace(/\.[^.]+$/, ""),
-        url: a.url,
-      }))
+    // Inline external images and custom font bytes so the headless page can
+    // load them (see prepare-design.ts).
+    const { designJson: renderJson, customFonts } = await prepareDesignForRender(
+      modifiedJson,
+      job.projectId
     );
 
     const { buffer, ext } = await renderToBuffer({
