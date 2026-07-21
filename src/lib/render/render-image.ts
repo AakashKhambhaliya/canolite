@@ -38,8 +38,14 @@ function collectFamilies(designJson: any): string[] {
   return Array.from(set);
 }
 
-// Build <head> markup that makes the design's fonts available in Chromium.
-function buildFontHead(families: string[], customFonts: CustomFontRef[]): string {
+/**
+ * Build <head> markup that makes the design's fonts available in Chromium.
+ *
+ * Custom font URLs must already be inlined as `data:` URLs (see
+ * `inlineFontSources`) — the render page has an opaque origin, so a network URL
+ * here is blocked by CORS and falls back to a generic face.
+ */
+export function buildFontHead(families: string[], customFonts: CustomFontRef[]): string {
   const customByFamily = new Map(customFonts.map((f) => [f.family, f.url]));
   const parts: string[] = [];
   for (const family of families) {

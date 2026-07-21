@@ -12,6 +12,7 @@ import { renderJobs, templates, assets } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { applyModifications } from "./apply-modifications";
 import { inlineExternalImages } from "./inline-images";
+import { inlineFontSources } from "./inline-fonts";
 import { renderToBuffer } from "./render-image";
 import { uploadFile, toAbsoluteUrl } from "@/lib/storage";
 import { safeFetch } from "@/lib/ssrf";
@@ -61,10 +62,14 @@ export async function processRenderJob(
       .where(
         and(eq(assets.projectId, job.projectId), eq(assets.type, "font"))
       );
-    const customFonts = fontAssets.map((a: any) => ({
-      family: a.name.replace(/\.[^.]+$/, ""),
-      url: a.url,
-    }));
+    // The render page's opaque origin blocks CORS-mode font fetches, so the
+    // bytes have to travel inline — see inline-fonts.ts.
+    const customFonts = await inlineFontSources(
+      fontAssets.map((a: any) => ({
+        family: a.name.replace(/\.[^.]+$/, ""),
+        url: a.url,
+      }))
+    );
 
     const { buffer, ext } = await renderToBuffer({
       designJson: renderJson,
