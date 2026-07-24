@@ -13,8 +13,28 @@ export async function GET() {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
+    // The listing UI only needs metadata and the thumbnail — never the
+    // design itself. designJson is a Fabric canvas that embeds images as
+    // base64 data URIs, so a bare select() ships megabytes per template and
+    // is refetched on every mutation. Project away that one heavy jsonb
+    // column; every other field is kept so consumers' shape is unchanged.
     const result = await db
-      .select()
+      .select({
+        id: templates.id,
+        templateId: templates.templateId,
+        projectId: templates.projectId,
+        name: templates.name,
+        description: templates.description,
+        width: templates.width,
+        height: templates.height,
+        outputDefaults: templates.outputDefaults,
+        thumbnailUrl: templates.thumbnailUrl,
+        tags: templates.tags,
+        isDeleted: templates.isDeleted,
+        version: templates.version,
+        createdAt: templates.createdAt,
+        updatedAt: templates.updatedAt,
+      })
       .from(templates)
       .where(
         and(
