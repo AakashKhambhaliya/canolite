@@ -17,5 +17,12 @@ export async function register() {
         console.error("[cleanup] Periodic cleanup failed:", e)
       );
     }, 60 * 60 * 1000); // every 1 hour
+
+    // Backfill previews for templates that don't have one yet. Fire-and-forget:
+    // renders are slow and must never block boot or request serving.
+    const { backfillThumbnails } = await import("@/lib/render/thumbnail");
+    backfillThumbnails().catch((e) =>
+      console.error("[thumbnail] Backfill failed:", e)
+    );
   }
 }

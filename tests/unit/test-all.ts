@@ -527,12 +527,124 @@ assert(!!schema.templateVersions, "templateVersions table exists");
 
 
 // =============================================================
+// 8. Render fonts
+// =============================================================
+console.log("\n8. Render fonts\n");
+
+import { promises as fsp } from "fs";
+import pathMod from "path";
+import { inlineFontSources } from "../../src/lib/render/inline-fonts";
+import { buildFontHead } from "../../src/lib/render/render-image";
+import { storageFilePath } from "../../src/lib/storage";
+
+async function renderFontTests() {
+  // The render page is created with page.setContent(), so it has an opaque
+  // "null" origin — and CSS font fetches are always CORS-mode. A font left as
+  // a /storage URL is therefore blocked and silently falls back to a generic
+  // face. The contract: every custom font reaching the render page carries its
+  // bytes inline.
+  const key = `fonts/test-${Date.now()}.ttf`;
+  const bytes = Buffer.from("OTTO-not-a-real-font");
+  const file = storageFilePath(key);
+  await fsp.mkdir(pathMod.dirname(file), { recursive: true });
+  await fsp.writeFile(file, bytes);
+
+  try {
+    const [font] = await inlineFontSources([
+      { family: "My Custom", url: `/storage/${key}` },
+    ]);
+    assert(font.url.startsWith("data:font/ttf;base64,"), "stored font URL is inlined as a data: URL");
+    assert(
+      Buffer.from(font.url.split(",")[1], "base64").equals(bytes),
+      "inlined font carries the stored bytes"
+    );
+    assertEqual(font.family, "My Custom", "inlining preserves the family name");
+  } finally {
+    await fsp.unlink(file).catch(() => {});
+  }
+
+  const already = "data:font/woff2;base64,AAAA";
+  const [passthrough] = await inlineFontSources([{ family: "X", url: already }]);
+  assertEqual(passthrough.url, already, "an already-inlined font is left untouched");
+
+  const [missing] = await inlineFontSources([
+    { family: "Gone", url: "/storage/fonts/does-not-exist.ttf" },
+  ]);
+  assertEqual(
+    missing.url,
+    "/storage/fonts/does-not-exist.ttf",
+    "an unresolvable font keeps its URL rather than failing the render"
+  );
+
+  const head = buildFontHead(["My Custom", "Arial"], [
+    { family: "My Custom", url: "data:font/ttf;base64,AAAA" },
+  ]);
+  assert(head.includes(`@font-face`), "custom family used in the design gets an @font-face");
+  assert(head.includes(`font-family:'My Custom'`), "@font-face declares the custom family");
+  assert(head.includes("data:font/ttf;base64,AAAA"), "@font-face src is the inlined URL");
+  assert(!head.includes("Arial"), "a family with no custom font gets no @font-face");
+}
+
+// =============================================================
+// 9. Template thumbnails
+// =============================================================
+console.log("\n9. Template thumbnails\n");
+
+import {
+  thumbnailKey,
+  thumbnailScale,
+  THUMBNAIL_MAX_EDGE,
+} from "../../src/lib/render/thumbnail";
+
+{
+  // The key carries updatedAt so editing a template produces a new URL —
+  // a stale preview can never survive in the browser cache.
+  assertEqual(
+    thumbnailKey("a1b2c3", new Date(1700000000000)),
+    "thumbnails/a1b2c3-1700000000000.webp",
+    "thumbnail key is thumbnails/<id>-<epochMs>.webp"
+  );
+
+  assert(
+    thumbnailKey("a1b2c3", new Date(1700000000000)) !==
+      thumbnailKey("a1b2c3", new Date(1700000000001)),
+    "key changes when updatedAt changes"
+  );
+
+  // Longest edge lands exactly on the target, whatever the orientation.
+  assertEqual(
+    Math.round(1080 * thumbnailScale(1080, 1080)),
+    THUMBNAIL_MAX_EDGE,
+    "square 1080x1080 scales to a 400px longest edge"
+  );
+  assertEqual(
+    Math.round(2752 * thumbnailScale(1536, 2752)),
+    THUMBNAIL_MAX_EDGE,
+    "portrait 1536x2752 scales to a 400px longest edge"
+  );
+  assertEqual(
+    Math.round(1920 * thumbnailScale(1920, 1080)),
+    THUMBNAIL_MAX_EDGE,
+    "landscape 1920x1080 scales to a 400px longest edge"
+  );
+
+  assertEqual(
+    thumbnailScale(200, 200),
+    1,
+    "a template smaller than the target is never upscaled"
+  );
+}
+
+
+// =============================================================
 // RESULTS
 // =============================================================
-console.log("\n================================================================");
-console.log(`  RESULTS: ${passed} passed, ${failed} failed`);
-console.log("================================================================");
+renderFontTests().then(() => {
+  console.log("\n================================================================");
+  console.log(`  RESULTS: ${passed} passed, ${failed} failed`);
+  console.log("================================================================");
 
-if (failed > 0) {
-  process.exit(1);
-}
+  if (failed > 0) {
+    process.exit(1);
+  }
+});

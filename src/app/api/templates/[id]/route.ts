@@ -4,6 +4,8 @@ import { templates, templateFields } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { extractFields } from "@/lib/render/apply-modifications";
+import { generateThumbnail } from "@/lib/render/thumbnail";
+import { deleteFile } from "@/lib/storage";
 
 export async function GET(
   request: Request,
@@ -72,6 +74,14 @@ export async function PUT(
     if (designJson !== undefined) updateData.designJson = designJson;
     if (outputDefaults !== undefined) updateData.outputDefaults = outputDefaults;
 
+    const designChanged =
+      designJson !== undefined || width !== undefined || height !== undefined;
+
+    // A stale preview must not outlive the design it depicts. Null the column
+    // now; the regeneration below repoints it at the new file. generateThumbnail
+    // owns cleanup of the superseded file once the new one is written.
+    if (designChanged) updateData.thumbnailUrl = null;
+
     const [template] = await db
       .update(templates)
       .set(updateData)
@@ -89,6 +99,13 @@ export async function PUT(
         { error: "Template not found" },
         { status: 404 }
       );
+    }
+
+    if (designChanged) {
+      // Fire-and-forget: a render takes seconds and must not delay the
+      // response. generateThumbnail deletes the superseded file itself once
+      // the new one is written.
+      void generateThumbnail(template.id);
     }
 
     // Regenerate template_fields from design_json
@@ -135,15 +152,33 @@ export async function DELETE(
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
+    const [existing] = await db
+      .select({ thumbnailUrl: templates.thumbnailUrl })
+      .from(templates)
+      .where(
+        and(
+          eq(templates.id, id),
+          eq(templates.projectId, user.projectId)
+        )
+      )
+      .limit(1);
+
     await db
       .update(templates)
-      .set({ isDeleted: true, updatedAt: new Date() })
+      .set({ isDeleted: true, updatedAt: new Date(), thumbnailUrl: null })
       .where(
         and(
           eq(templates.id, id),
           eq(templates.projectId, user.projectId)
         )
       );
+
+    // A soft-deleted template's thumbnail file is orphaned. Remove it —
+    // best-effort, deleteFile ignores misses.
+    const previous = existing?.thumbnailUrl;
+    if (previous?.startsWith("/storage/")) {
+      void deleteFile(previous.replace(/^\/storage\//, ""));
+    }
 
     return NextResponse.json({ success: true });
   } catch (error) {
