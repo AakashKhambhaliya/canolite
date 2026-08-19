@@ -53,13 +53,25 @@ docker run -d --name canolite -p 3000:3000 \
    Repository* and paste `https://github.com/AakashKhambhaliya/canolite`).
 2. **Build Pack: `Dockerfile`.** Coolify auto-detects the `Dockerfile` in the repo root.
 
-   > ⚠️ **This must be `Dockerfile`, not Nixpacks.** Nixpacks is the default for
-   > a Node repo and it *will* build and start successfully — then every render
-   > fails with `browserType.launch: Executable doesn't exist at
-   > /root/.cache/ms-playwright/...`. Only the Dockerfile installs headless
-   > Chromium and its system libraries. If you see that error, check this
-   > setting first: a path under `/root/.cache` means the Dockerfile wasn't
-   > used, because the image sets `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`.
+   > ⚠️ **This must be `Dockerfile`.** Coolify's *Build strategy* dropdown
+   > defaults to **Railpack** (older versions: **Nixpacks**), and neither uses
+   > the `Dockerfile` in this repo. They *will* build and start successfully —
+   > the app boots, passes its health check and serves the dashboard — and then
+   > every render fails with:
+   >
+   > ```
+   > browserType.launch: Executable doesn't exist at
+   > /root/.cache/ms-playwright/chromium_headless_shell-<build>/...
+   > ```
+   >
+   > Only the Dockerfile installs headless Chromium and its system libraries.
+   > The `/root/.cache` prefix is how you recognise the mistake: the image sets
+   > `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so any path under `/root/.cache`
+   > proves the Dockerfile wasn't used.
+   >
+   > **Set the `/app/data` volume (step 4) before switching**, or the first
+   > Dockerfile deploy will refuse to boot and roll back — the image enables the
+   > persistence guard, and that is the guard working, not a broken build.
 3. **Port:** set the exposed port to `3000`.
 4. **Persistent Storage** (Storages tab) — add **one** volume mount:
    - `/app/data`

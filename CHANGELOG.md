@@ -16,8 +16,9 @@ browserType.launch: Executable doesn't exist at
 **Root cause.** Rendering needs a Chromium whose build number matches the
 installed Playwright exactly. Only the Dockerfile ever downloaded it. Every
 other install path — a bare-VPS Node install, or a buildpack deploy such as
-Coolify's default **Nixpacks** — installed the library with no browser, started
-up perfectly healthy, and then failed at the first render. The `/root/.cache`
+Coolify's **Railpack** (its current default *Build strategy*) or **Nixpacks** —
+installed the library with no browser, started up perfectly healthy, and then
+failed at the first render. The `/root/.cache`
 in the path is the tell: the official image sets
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so that path proves the Dockerfile
 wasn't used.
