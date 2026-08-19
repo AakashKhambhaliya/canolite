@@ -14,20 +14,27 @@
 # without a real volume it would silently lose every template, API key and
 # render on the next redeploy).
 #
-# This pulls the prebuilt image, so there is no build step and no waiting for
-# Chromium to download. To build from source instead, use the Dockerfile build
-# strategy against this repo.
+# On x86-64 this pulls the prebuilt image. On ARM64 (Oracle Ampere, Graviton,
+# Raspberry Pi) no prebuilt image exists yet, so it builds from source instead —
+# a few minutes, fully automatic, no configuration change needed.
 # ============================================================
 services:
   canolite:
     image: ghcr.io/aakashkhambhaliya/canolite:latest
+    # Build from source when no prebuilt image matches this machine. The
+    # published image is linux/amd64 only, so on an ARM64 host (Oracle Ampere,
+    # AWS Graviton, Raspberry Pi) a pull fails with:
+    #   no matching manifest for linux/arm64/v8 in the manifest list entries
+    # With a build section, Compose builds locally instead — a few minutes,
+    # and it produces an image native to the host.
+    build: .
 
     environment:
-      # Coolify substitutes the generated (or your custom) domain here and
-      # points its proxy at port 3000. APP_URL reuses it so the image URLs the
-      # API hands back resolve publicly instead of pointing at localhost.
-      - SERVICE_FQDN_CANOLITE_3000
-      - APP_URL=${SERVICE_FQDN_CANOLITE_3000}
+      # Coolify injects COOLIFY_FQDN into the compose environment (you can see
+      # it in the deploy command it runs). APP_URL reuses it so the image URLs
+      # the API returns resolve publicly instead of pointing at localhost.
+      # Setting APP_URL in Coolify's environment panel overrides this.
+      - APP_URL=${APP_URL:-https://${COOLIFY_FQDN}}
       #
       # Optional — set both to skip the first-run setup wizard. They also act
       # as a recovery net: if the admin row is ever lost, these restore it.

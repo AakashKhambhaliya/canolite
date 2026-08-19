@@ -4,6 +4,33 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.6.9
+
+Fixes the one-click Coolify compose file on ARM64 hosts.
+
+The published image is `linux/amd64` only, so on an ARM64 server — Oracle
+Ampere, AWS Graviton, a Raspberry Pi — the deploy failed at the pull:
+
+```
+no matching manifest for linux/arm64/v8 in the manifest list entries
+```
+
+`docker-compose.coolify.yml` now carries a `build:` section, so Compose builds
+from source when no prebuilt image matches the host. On x86-64 nothing changes;
+on ARM64 it builds locally in a few minutes instead of failing. No
+configuration change either way.
+
+Also fixes `APP_URL`. It used Coolify's `SERVICE_FQDN_CANOLITE_3000` magic
+variable, which is not populated for compose-based applications — deploys
+warned `variable is not set. Defaulting to a blank string`. It now uses
+`COOLIFY_FQDN`, which Coolify does inject, and still defers to an explicit
+`APP_URL` set in the environment panel.
+
+Multi-architecture images are the better long-term fix and are not done yet;
+until then ARM64 hosts build from source.
+
+No runtime changes.
+
 ## v1.6.8
 
 One-click Coolify install. Adds `docker-compose.coolify.yml`, which declares
