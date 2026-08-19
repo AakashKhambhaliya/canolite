@@ -43,3 +43,4 @@ coverage/
 public/storage/
 .update-last-check
 .update-status.json
+.backups/

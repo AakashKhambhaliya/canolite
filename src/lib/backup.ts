@@ -16,10 +16,14 @@ import path from "path";
 import { spawn } from "child_process";
 import { sql } from "drizzle-orm";
 
-// Default is the persistent volume's backups dir in Docker. Overridable so the
-// bare-VPS / git-checkout path (no /app/data) can back up somewhere sensible,
-// and for testing.
-const BACKUP_ROOT = process.env.BACKUP_DIR || "/app/data/backups";
+// Default is the persistent volume's backups dir in Docker; on a bare-VPS /
+// git-checkout deployment (no /app/data) it falls back to ./.backups. Overridable
+// via BACKUP_DIR.
+const BACKUP_ROOT =
+  process.env.BACKUP_DIR ||
+  (fs.existsSync("/app/data")
+    ? "/app/data/backups"
+    : path.join(process.cwd(), ".backups"));
 const MAX_BACKUPS = 5;
 
 function getAppVersion(): string {

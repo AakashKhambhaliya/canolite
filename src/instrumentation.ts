@@ -3,66 +3,13 @@
  * Ensures the database schema and demo data exist before serving requests.
  */
 
-const DATA_DIR = "/app/data";
-
-/**
- * Persistence guard (Task 2). When REQUIRE_PERSISTENT_DATA=1, refuse to boot
- * unless /app/data is a mounted volume (different filesystem device from the
- * image layer's /app) and writable. Running without a volume is exactly what
- * wipes the instance on every Coolify redeploy — fail loudly instead.
- *
- * `fs` is loaded lazily: a top-level static `import fs from "fs"` fails to
- * compile here because Next builds the instrumentation entry for both the
- * nodejs and edge runtimes.
- */
-function assertPersistentData(fs: typeof import("fs")): void {
-  if (process.env.REQUIRE_PERSISTENT_DATA !== "1") return;
-
-  let appStat: import("fs").Stats;
-  try {
-    appStat = fs.statSync("/app");
-  } catch {
-    return; // no /app (local dev) — nothing to guard
-  }
-
-  let dataStat: import("fs").Stats;
-  try {
-    dataStat = fs.statSync(DATA_DIR);
-  } catch {
-    throw new Error(
-      "REQUIRE_PERSISTENT_DATA=1 but " +
-        DATA_DIR +
-        " does not exist. Mount a persistent volume at " +
-        DATA_DIR +
-        " (Coolify → Storages)."
-    );
-  }
-
-  if (dataStat.dev === appStat.dev) {
-    throw new Error(
-      "REQUIRE_PERSISTENT_DATA=1 but " +
-        DATA_DIR +
-        " is not a mounted volume — it lives in the container's image layer " +
-        "and will be wiped on every redeploy. Mount a persistent volume at " +
-        DATA_DIR +
-        " (Coolify → Storages)."
-    );
-  }
-
-  fs.accessSync(DATA_DIR, fs.constants.W_OK);
-}
-
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
-    const fs = await import("fs");
-
     // Fail loudly on an unpersisted /app/data BEFORE touching the database.
-    try {
-      assertPersistentData(fs);
-    } catch (e) {
-      console.error(
-        "[boot] Fatal: " + (e instanceof Error ? e.message : String(e))
-      );
+    const { persistentDataStatus } = await import("@/lib/persistence");
+    const guard = persistentDataStatus();
+    if (!guard.ok) {
+      console.error("[boot] Fatal: " + (guard.reason || "unpersisted data"));
       process.exit(1);
       return;
     }
