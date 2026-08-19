@@ -88,18 +88,49 @@ jobs:
         with:
           fetch-depth: 0 # full history so release notes can diff against the previous tag
 
+      # Prefer the hand-written section from CHANGELOG.md — a bare commit list
+      # doesn't tell an operator that this upgrade needs a volume mounted first.
+      # Falls back to generated notes when the tag has no changelog entry.
+      - name: Extract release notes
+        id: notes
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="$tag" '
+              $0 ~ "^## " tag "([[:space:]]|$)" { inside=1; next }
+              inside && /^## / { exit }
+              inside { print }
+            ' CHANGELOG.md > release-notes.md
+          fi
+          if [ -s release-notes.md ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Using CHANGELOG.md section for $tag."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No CHANGELOG.md section for $tag — falling back to generated notes."
+          fi
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_NOTES: ${{ steps.notes.outputs.found }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          if [ "$HAS_NOTES" = "true" ]; then
+            notes=(--notes-file release-notes.md)
+          else
+            notes=(--generate-notes)
+          fi
+
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists — marking it latest."
-            gh release edit "$tag" --draft=false --prerelease=false --latest
+            echo "Release $tag already exists — refreshing notes and marking it latest."
+            if [ "$HAS_NOTES" = "true" ]; then
+              gh release edit "$tag" --notes-file release-notes.md \
+                --draft=false --prerelease=false --latest
+            else
+              gh release edit "$tag" --draft=false --prerelease=false --latest
+            fi
           else
             echo "Creating release $tag."
-            gh release create "$tag" \
-              --title "Canolite $tag" \
-              --generate-notes \
-              --latest
+            gh release create "$tag" --title "Canolite $tag" "${notes[@]}" --latest
           fi
