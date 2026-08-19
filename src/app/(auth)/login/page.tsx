@@ -65,9 +65,28 @@ export default function LoginPage() {
         return;
       }
 
+      // The response above carried the session cookie. Confirm the browser
+      // actually kept it BEFORE navigating: if it didn't, the dashboard bounces
+      // straight back here and the user is stuck staring at a login page that
+      // keeps telling them the login worked. The usual cause is a `Secure`
+      // cookie on a plain-HTTP origin — a proxy sending X-Forwarded-Proto:
+      // https while the browser is talking to the app over http://.
+      const check = await fetch("/api/auth/me", { cache: "no-store" });
+      if (!check.ok) {
+        const msg =
+          "Signed in, but your browser didn't keep the session cookie. " +
+          "If you're using plain HTTP behind a proxy, make sure it isn't " +
+          "sending X-Forwarded-Proto: https — or open the app over HTTPS.";
+        setError(msg);
+        toast.error(msg);
+        return;
+      }
+
       toast.success("Welcome back!");
-      router.push("/");
-      router.refresh();
+      // Hard navigation, not router.push(): it re-runs middleware and the
+      // server layout against the cookie the browser actually holds, with no
+      // client-side router cache in the way.
+      window.location.replace("/");
     } catch (err) {
       toast.error("Something went wrong. Please try again.");
     } finally {

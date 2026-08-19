@@ -12,19 +12,29 @@ export async function createSession(userId: string): Promise<void> {
   const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   await db.insert(sessions).values({ sessionToken, userId, expires });
 
-  // Mark the cookie `Secure` only when the request actually arrived over HTTPS.
-  // Behind a TLS-terminating proxy (Coolify/Traefik/nginx) the app itself sees
-  // plain HTTP, so we trust the X-Forwarded-Proto header the proxy sets. Keying
-  // off NODE_ENV (always "production" here) would mark the cookie Secure even on
-  // plain-HTTP installs (e.g. http://server-ip:3000) — the browser then silently
-  // drops it, leaving the user stuck on the login page after a successful login.
+  // Mark the cookie `Secure` only when the BROWSER is on HTTPS. That's the
+  // scheme that decides whether the cookie is kept — a Secure cookie sent to an
+  // http:// origin is silently dropped, leaving the user on the login page
+  // after a successful sign-in. (Keying off NODE_ENV would break every
+  // plain-HTTP install, e.g. http://server-ip:3000.)
+  //
+  // `Origin` comes from the browser itself and is sent on same-origin POSTs, so
+  // it is the authoritative signal. X-Forwarded-Proto is only a fallback: it
+  // describes the proxy→app hop, and a proxy configured for an HTTPS domain can
+  // report "https" even while this particular visitor is on plain HTTP.
   const hdrs = await headers();
-  const proto = hdrs
+  const browserOrigin = hdrs.get("origin") || hdrs.get("referer") || "";
+  const forwardedProto = hdrs
     .get("x-forwarded-proto")
     ?.split(",")[0]
     .trim()
     .toLowerCase();
-  const isHttps = proto === "https";
+
+  const isHttps = browserOrigin.startsWith("https://")
+    ? true
+    : browserOrigin.startsWith("http://")
+    ? false
+    : forwardedProto === "https";
 
   const cookieStore = await cookies();
   cookieStore.set("session_token", sessionToken, {

@@ -74,9 +74,22 @@ export default function SetupPage() {
         setError(data.error || "Setup failed");
         return;
       }
+      // Same guard as the login page: confirm the session cookie survived
+      // before navigating, so a rejected cookie surfaces as a real message
+      // instead of an unexplained bounce back to the login screen.
+      const check = await fetch("/api/auth/me", { cache: "no-store" });
+      if (!check.ok) {
+        const msg =
+          "Account created, but your browser didn't keep the session cookie. " +
+          "If you're using plain HTTP behind a proxy, make sure it isn't " +
+          "sending X-Forwarded-Proto: https — or open the app over HTTPS.";
+        setError(msg);
+        toast.error(msg);
+        return;
+      }
+
       toast.success("Admin account created");
-      router.push("/");
-      router.refresh();
+      window.location.replace("/");
     } catch {
       toast.error("Something went wrong. Please try again.");
     } finally {
