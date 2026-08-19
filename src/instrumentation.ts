@@ -25,6 +25,35 @@ export async function register() {
     await migrateLegacyStorage();
     await ensureBucket();
 
+    // Renders need a Chromium whose build number matches the installed
+    // Playwright. Deployments that don't use our Dockerfile (bare VPS, or a
+    // buildpack like Nixpacks) have historically started fine and then failed
+    // on the first render with an opaque "Executable doesn't exist" error.
+    // Say it at boot instead, where an operator will actually see it.
+    try {
+      const { chromium } = await import("playwright");
+      const fs = await import("fs");
+      const exe = chromium.executablePath();
+      if (!fs.existsSync(exe)) {
+        console.error(
+          "[render] Chromium is missing — renders WILL fail.\n" +
+            "[render]   expected at: " +
+            exe +
+            "\n[render]   fix with:    npx playwright install --with-deps chromium" +
+            (process.env.PLAYWRIGHT_BROWSERS_PATH
+              ? ""
+              : "\n[render]   note: PLAYWRIGHT_BROWSERS_PATH is unset, so Playwright is " +
+                "using the default per-user cache. The official Docker image sets it to " +
+                "/ms-playwright and ships the browser; a non-Docker deploy must install it.")
+        );
+      }
+    } catch (e) {
+      console.error(
+        "[render] Could not verify the Chromium install:",
+        e instanceof Error ? e.message : e
+      );
+    }
+
     // Instance-marker consistency check (lost/mismatched volume detection).
     const { checkInstanceConsistency } = await import("@/db/seed-data");
     await checkInstanceConsistency(db).catch((e) =>

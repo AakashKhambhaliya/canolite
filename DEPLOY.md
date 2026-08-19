@@ -52,6 +52,14 @@ docker run -d --name canolite -p 3000:3000 \
 1. **New Resource → Application.** Pick your Git repository (or *Public
    Repository* and paste `https://github.com/AakashKhambhaliya/canolite`).
 2. **Build Pack: `Dockerfile`.** Coolify auto-detects the `Dockerfile` in the repo root.
+
+   > ⚠️ **This must be `Dockerfile`, not Nixpacks.** Nixpacks is the default for
+   > a Node repo and it *will* build and start successfully — then every render
+   > fails with `browserType.launch: Executable doesn't exist at
+   > /root/.cache/ms-playwright/...`. Only the Dockerfile installs headless
+   > Chromium and its system libraries. If you see that error, check this
+   > setting first: a path under `/root/.cache` means the Dockerfile wasn't
+   > used, because the image sets `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`.
 3. **Port:** set the exposed port to `3000`.
 4. **Persistent Storage** (Storages tab) — add **one** volume mount:
    - `/app/data`

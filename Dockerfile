@@ -12,7 +12,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 # ---- Dependencies (incl. dev, for building) ----
 FROM base AS deps
+# This stage only compiles the app — it never renders, so skip the browser
+# download the postinstall hook would otherwise do here.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY package.json package-lock.json* ./
+COPY scripts ./scripts
 RUN npm ci
 
 # ---- Build ----
@@ -43,7 +47,10 @@ ENV NODE_ENV=production \
     APP_VERSION=${APP_VERSION}
 
 # Production deps, then download Chromium + its system libraries.
+# scripts/ must land before `npm ci` — the postinstall hook lives there and npm
+# runs it as part of the install.
 COPY package.json package-lock.json* ./
+COPY scripts ./scripts
 RUN npm ci --omit=dev \
  && npx playwright install --with-deps chromium \
  && npm cache clean --force \

@@ -98,6 +98,20 @@ async function getBrowser(): Promise<Browser> {
       const browser = await chromium.launch({
         headless: true,
         args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+      }).catch((e: unknown) => {
+        // Playwright's own message points at `npx playwright install`, which
+        // installs whatever version npx resolves from the registry — not
+        // necessarily the one this app has. Name the deterministic command.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/Executable doesn't exist/i.test(msg)) {
+          throw new Error(
+            msg.split("\n")[0] +
+              "\nThe Chromium build matching this Playwright version isn't installed. " +
+              "Run `npx playwright install --with-deps chromium` in the app directory " +
+              "(or use the official Docker image, which ships it)."
+          );
+        }
+        throw e;
       });
       globalForBrowser.__canoliteBrowser = browser;
       return browser;

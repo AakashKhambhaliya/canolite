@@ -1,9 +1,10 @@
 {
   "name": "canolite",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "private": true,
   "license": "MIT",
   "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

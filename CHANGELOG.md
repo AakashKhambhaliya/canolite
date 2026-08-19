@@ -4,6 +4,45 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.6.6
+
+Fixes renders failing on a fresh install with:
+
+```
+browserType.launch: Executable doesn't exist at
+/root/.cache/ms-playwright/chromium_headless_shell-1223/...
+```
+
+**Root cause.** Rendering needs a Chromium whose build number matches the
+installed Playwright exactly. Only the Dockerfile ever downloaded it. Every
+other install path — a bare-VPS Node install, or a buildpack deploy such as
+Coolify's default **Nixpacks** — installed the library with no browser, started
+up perfectly healthy, and then failed at the first render. The `/root/.cache`
+in the path is the tell: the official image sets
+`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so that path proves the Dockerfile
+wasn't used.
+
+- The browser is now downloaded by a **postinstall hook**, so it is fetched by
+  the same command that installs the library and the two can't drift apart.
+  This covers bare-VPS installs, buildpack deploys, and self-updates alike.
+  Set `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` to opt out (CI, build-only images).
+- **Startup now says so.** If the expected browser is missing, boot logs a loud
+  error naming the exact path and the command to fix it, instead of staying
+  silent until someone tries to render.
+- **The render error is actionable.** Playwright's stock message suggests
+  `npx playwright install`, which installs whatever version npx resolves from
+  the registry — not necessarily the one this app pins. The message now names
+  the deterministic command.
+- `DEPLOY.md` warns that Coolify's Build Pack must be `Dockerfile`, not
+  Nixpacks, and how to recognise that mistake from the error path.
+
+If you're already broken, the immediate fix is to run this in the app
+directory, or switch the deployment to the Dockerfile/official image:
+
+```
+npx playwright install --with-deps chromium
+```
+
 ## v1.6.5
 
 Documentation release: adds this changelog and makes CI publish it as the
