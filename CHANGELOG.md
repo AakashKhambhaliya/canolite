@@ -4,6 +4,25 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.6.7
+
+Documentation correction. No runtime changes since v1.6.6.
+
+v1.6.6 blamed **Nixpacks** for renders failing with a browser path under
+`/root/.cache`. Confirmed on a real instance since: Coolify's *Build strategy*
+dropdown now defaults to **Railpack**, and it fails in exactly the same way.
+Neither build strategy uses the `Dockerfile` in this repo, so neither installs
+headless Chromium — the app builds, boots, passes its health check and serves
+the dashboard, and then every render fails.
+
+If rendering is broken on Coolify, check **Configuration → Build strategy**
+first. It must be `Dockerfile`.
+
+**Set the `/app/data` volume before switching.** The image enables the
+persistence guard, so a first Dockerfile deploy without a mounted volume will
+refuse to boot and roll back — that is the guard working, not a broken build.
+Switching build strategy and adding the volume are one change, not two.
+
 ## v1.6.6
 
 Fixes renders failing on a fresh install with:
