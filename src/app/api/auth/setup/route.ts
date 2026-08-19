@@ -4,6 +4,7 @@ import { users } from "@/db/schema";
 import { eq, and, isNull } from "drizzle-orm";
 import { createSession } from "@/lib/auth";
 import { getAdminUser, hashPassword, isSetupComplete } from "@/lib/admin";
+import { writeInstanceMarker } from "@/db/seed-data";
 
 /** Report whether the admin account has been configured. */
 export async function GET() {
@@ -75,6 +76,10 @@ export async function POST(request: Request) {
 
     // Sign the new admin in immediately.
     await createSession(admin.id);
+
+    // Persist an instance marker now that the admin is configured, so a later
+    // volume loss/mismatch is detectable at boot.
+    writeInstanceMarker();
 
     return NextResponse.json({
       message: "Setup complete",

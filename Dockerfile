@@ -29,7 +29,8 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     DATABASE_URL=pglite:///app/data/pglite \
-    STORAGE_DIR=/app/data/storage
+    STORAGE_DIR=/app/data/storage \
+    REQUIRE_PERSISTENT_DATA=1
 
 # Production deps, then download Chromium + its system libraries.
 COPY package.json package-lock.json* ./

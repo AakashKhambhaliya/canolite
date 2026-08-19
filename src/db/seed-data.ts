@@ -1,7 +1,115 @@
 import * as schema from "./schema";
 import { v4 as uuidv4 } from "uuid";
 import bcrypt from "bcryptjs";
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, isNotNull } from "drizzle-orm";
+import fs from "fs";
+import path from "path";
+import { randomUUID } from "crypto";
+
+const DATA_DIR = "/app/data";
+const INSTANCE_MARKER = path.join(DATA_DIR, ".instance.json");
+
+/**
+ * Whether the demo template should be inserted on a fresh DB. Explicit env var
+ * wins; otherwise demo data is on for development and OFF for production — an
+ * empty dashboard is an unmistakable alarm, whereas a resurrected demo template
+ * looks like the app overwrote the customer's work.
+ */
+function shouldSeedDemoData(): boolean {
+  const explicit = process.env.SEED_DEMO_DATA;
+  if (explicit !== undefined) return explicit === "true";
+  return process.env.NODE_ENV !== "production";
+}
+
+function getAppVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), "package.json"), "utf-8")
+    );
+    return pkg.version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+export interface InstanceMarker {
+  instanceId?: string;
+  createdAt?: string;
+  version?: string;
+}
+
+export function readInstanceMarker(): InstanceMarker | null {
+  try {
+    if (!fs.existsSync(INSTANCE_MARKER)) return null;
+    return JSON.parse(fs.readFileSync(INSTANCE_MARKER, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Write the instance marker once (idempotent). No-op outside /app/data. */
+export function writeInstanceMarker(): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) return; // local dev — no persistent dir
+    if (fs.existsSync(INSTANCE_MARKER)) return;
+    const marker: InstanceMarker = {
+      instanceId: randomUUID(),
+      createdAt: new Date().toISOString(),
+      version: getAppVersion(),
+    };
+    fs.writeFileSync(INSTANCE_MARKER, JSON.stringify(marker, null, 2));
+    console.log("[instance] Wrote instance marker:", INSTANCE_MARKER);
+  } catch (e) {
+    console.warn("[instance] Could not write instance marker:", e);
+  }
+}
+
+/**
+ * Boot-time consistency check. Logs a prominent warning when the DB and the
+ * persisted files disagree with the instance marker — a signature of a lost or
+ * swapped volume. Also writes the marker once the admin is configured.
+ */
+export async function checkInstanceConsistency(db: any): Promise<void> {
+  const marker = readInstanceMarker();
+
+  const [firstUser] = await db.select().from(schema.users).limit(1);
+  const hasUsers = !!firstUser;
+
+  const storageRoot =
+    process.env.STORAGE_DIR || path.join(process.cwd(), "public", "storage");
+  let storageHasFiles = false;
+  try {
+    storageHasFiles = fs.readdirSync(storageRoot).length > 0;
+  } catch {
+    storageHasFiles = false;
+  }
+
+  if (marker && !hasUsers) {
+    console.warn(
+      "⚠️  [instance] VOLUME MISMATCH: an instance marker exists at " +
+        `${INSTANCE_MARKER} but the database has no users. The database may ` +
+        "have been lost or pointed at a fresh backend — review your volume " +
+        "mounts and DATABASE_URL before continuing."
+    );
+  }
+  if (!marker && storageHasFiles) {
+    console.warn(
+      "⚠️  [instance] VOLUME MISMATCH: rendered files exist in storage but no " +
+        "instance marker was found. A volume may have been lost or swapped — " +
+        "review your volume mounts."
+    );
+  }
+
+  // Write the marker once the admin account has been configured.
+  if (!marker) {
+    const [configured] = await db
+      .select()
+      .from(schema.users)
+      .where(isNotNull(schema.users.passwordHash))
+      .limit(1);
+    if (configured) writeInstanceMarker();
+  }
+}
 
 /**
  * Optional headless setup: if ADMIN_EMAIL and ADMIN_PASSWORD are both set and
@@ -31,6 +139,7 @@ export async function autoProvisionAdminFromEnv(db: any): Promise<void> {
     })
     .where(eq(schema.users.id, admin.id));
   console.log("✅ Admin auto-provisioned from ADMIN_EMAIL/ADMIN_PASSWORD");
+  writeInstanceMarker();
 }
 
 /**
@@ -66,6 +175,16 @@ export async function seedIfEmpty(db: any): Promise<void> {
       userId: user.id,
     })
     .returning();
+
+  // Demo template is gated: off by default in production so a fresh DB shows
+  // an empty dashboard (an unmistakable alarm) instead of a resurrected demo.
+  if (!shouldSeedDemoData()) {
+    console.log(
+      "ℹ️  Skipping demo template (SEED_DEMO_DATA not enabled). " +
+        "The dashboard will start empty."
+    );
+    return;
+  }
 
   const templateId = `tmpl_${uuidv4().replace(/-/g, "").slice(0, 16)}`;
   const sampleDesign = {

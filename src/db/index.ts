@@ -16,6 +16,25 @@ import * as schema from "./schema";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const usePglite = !DATABASE_URL || DATABASE_URL.startsWith("pglite");
 
+/**
+ * The original data-loss trap: a blank `DATABASE_URL` (set in a Coolify env
+ * panel) OVERRIDES the Dockerfile's `ENV DATABASE_URL=pglite:///app/data/pglite`,
+ * silently relocating the database into `./.pglite` — inside the container
+ * layer, outside any mounted volume. When the persistence guard is on, refuse
+ * to boot on that condition rather than starting a fresh empty database.
+ */
+function assertDatabaseConfig(): void {
+  const raw = process.env.DATABASE_URL;
+  if (raw === "" && process.env.REQUIRE_PERSISTENT_DATA === "1") {
+    throw new Error(
+      "DATABASE_URL is set but empty, which overrides the Dockerfile default " +
+        "(pglite:///app/data/pglite) and relocates the database into the " +
+        "container's ephemeral layer. Remove the empty DATABASE_URL variable " +
+        "from Coolify (blank is worse than absent) — do NOT create it at all."
+    );
+  }
+}
+
 // Both backends expose the same drizzle query builder; type against the
 // node-postgres variant so the rest of the app gets full inference.
 type DrizzleDb = NodePgDatabase<typeof schema>;
@@ -71,6 +90,9 @@ export async function ensureDb(): Promise<void> {
   if (globalForDb.__canoliteReady) return globalForDb.__canoliteReady;
 
   globalForDb.__canoliteReady = (async () => {
+    // Refuse to boot on the blank-DATABASE_URL trap before touching the DB.
+    assertDatabaseConfig();
+
     // Apply migrations on boot for both backends so deployments need no
     // separate migration step.
     if (usePglite) {
