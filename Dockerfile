@@ -24,13 +24,23 @@ RUN npm run build
 
 # ---- Runner ----
 FROM base AS runner
+
+# Build-time identity. Coolify passes SOURCE_COMMIT automatically; the GHCR
+# workflow passes GIT_SHA/APP_VERSION explicitly. GIT_SHA falls back to
+# SOURCE_COMMIT, and both fall back to "unknown".
+ARG SOURCE_COMMIT=unknown
+ARG GIT_SHA=${SOURCE_COMMIT}
+ARG APP_VERSION
+
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     DATABASE_URL=pglite:///app/data/pglite \
     STORAGE_DIR=/app/data/storage \
-    REQUIRE_PERSISTENT_DATA=1
+    REQUIRE_PERSISTENT_DATA=1 \
+    GIT_SHA=${GIT_SHA} \
+    APP_VERSION=${APP_VERSION}
 
 # Production deps, then download Chromium + its system libraries.
 COPY package.json package-lock.json* ./
@@ -48,6 +58,9 @@ COPY --from=builder /app/next.config.mjs ./next.config.mjs
 # Writable data dirs (PGlite DB + rendered images / uploads + backups). Mount a
 # volume at /app/data to persist everything — the app keeps all state under it.
 RUN mkdir -p /app/data/pglite /app/data/storage /app/data/backups
+
+# Record when this image was built (reported by /api/health as buildTime).
+RUN date -u +"%Y-%m-%dT%H:%M:%SZ" > /app/.build-time
 
 EXPOSE 3000
 

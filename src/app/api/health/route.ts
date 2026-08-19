@@ -13,8 +13,35 @@ function getVersion(): string {
   }
 }
 
-/** Lightweight liveness probe for Docker / Coolify / Dokploy health checks.
- *  Also reports the running version so the updater UI can confirm a restart. */
+/** Commit SHA baked into the image at build time (GIT_SHA or SOURCE_COMMIT). */
+function getCommit(): string {
+  return (
+    process.env.GIT_SHA || process.env.SOURCE_COMMIT || "unknown"
+  );
+}
+
+/** Image build timestamp, written by the Dockerfile. */
+function getBuildTime(): string {
+  try {
+    return fs
+      .readFileSync(path.join(process.cwd(), ".build-time"), "utf-8")
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Lightweight liveness probe for Docker / Coolify / Dokploy health checks.
+ * Also reports the running version, commit, and build time so the updater UI
+ * can confirm a redeploy landed. `status` and `version` are unchanged for
+ * backwards compatibility (the Docker HEALTHCHECK keys off this endpoint).
+ */
 export async function GET() {
-  return NextResponse.json({ status: "ok", version: getVersion() });
+  return NextResponse.json({
+    status: "ok",
+    version: getVersion(),
+    commit: getCommit(),
+    buildTime: getBuildTime(),
+  });
 }
