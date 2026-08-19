@@ -14,7 +14,7 @@ import * as schema from "./schema";
  */
 
 const DATABASE_URL = process.env.DATABASE_URL || "";
-const usePglite = !DATABASE_URL || DATABASE_URL.startsWith("pglite");
+export const usePglite = !DATABASE_URL || DATABASE_URL.startsWith("pglite");
 
 /**
  * The original data-loss trap: a blank `DATABASE_URL` (set in a Coolify env
@@ -92,6 +92,20 @@ export async function ensureDb(): Promise<void> {
   globalForDb.__canoliteReady = (async () => {
     // Refuse to boot on the blank-DATABASE_URL trap before touching the DB.
     assertDatabaseConfig();
+
+    // Back up before applying any pending migration — never on every boot.
+    // Failures must not block boot, so everything is logged and swallowed.
+    try {
+      const { hasPendingMigrations, createBackup } = require("../lib/backup");
+      if (await hasPendingMigrations(db as any)) {
+        await createBackup("pre-migration");
+      }
+    } catch (e) {
+      console.warn(
+        "[backup] Pre-migration backup skipped:",
+        e instanceof Error ? e.message : e
+      );
+    }
 
     // Apply migrations on boot for both backends so deployments need no
     // separate migration step.

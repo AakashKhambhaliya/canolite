@@ -13,6 +13,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/db/seed.ts",
+    "db:backup": "tsx src/db/backup.ts",
     "worker": "tsx src/queue/worker.ts"
   },
   "dependencies": {
