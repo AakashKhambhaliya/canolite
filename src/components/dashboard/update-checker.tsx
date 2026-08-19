@@ -15,6 +15,14 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface UpdateInfo {
   updateAvailable: boolean;
@@ -25,11 +33,15 @@ interface UpdateInfo {
   lastCheck: number;
   checkedAt: number;
   canSelfUpdate?: boolean;
+  mode?: "coolify" | "git" | "none";
+  latestVersion?: string | null;
+  checkStatus?: "ok" | "unknown";
   error?: string;
 }
 
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
-const RESTART_TIMEOUT = 8 * 60 * 1000; // give the rebuild+restart up to 8 min
+const GIT_RESTART_TIMEOUT = 8 * 60 * 1000; // git rebuild+restart: up to 8 min
+const COOLIFY_TIMEOUT = 10 * 60 * 1000; // Coolify rebuild includes Chromium
 
 const PHASE_LABELS: Record<string, string> = {
   pulling: "Pulling latest code…",
@@ -46,7 +58,11 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
   const [restarting, setRestarting] = useState(false);
   const [restartPhase, setRestartPhase] = useState<string>("pulling");
   const [restartStuck, setRestartStuck] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const pollingRef = useRef(false);
+
+  const isCoolify = info?.mode === "coolify";
+  const canApplyUpdate = info?.mode === "git" || info?.mode === "coolify";
 
   const checkForUpdates = useCallback(async (silent = false) => {
     setChecking(true);
@@ -67,10 +83,9 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
   }, []);
 
   /**
-   * Once the update is kicked off the server rebuilds and then restarts itself.
-   * We poll: track progress, wait for the server to go *down* (the restart) and
-   * come back *up* on the new build, then reload into it. This is what keeps the
-   * flow from getting stuck "at restart".
+   * git path — once the update is kicked off the server rebuilds and then
+   * restarts itself. We poll: track progress, wait for the server to go *down*
+   * (the restart) and come back *up* on the new build, then reload into it.
    */
   const pollUntilRestarted = useCallback(() => {
     if (pollingRef.current) return;
@@ -79,7 +94,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     let sawDown = false;
 
     const tick = async () => {
-      if (Date.now() - startedAt > RESTART_TIMEOUT) {
+      if (Date.now() - startedAt > GIT_RESTART_TIMEOUT) {
         pollingRef.current = false;
         setRestartStuck(true);
         return;
@@ -125,6 +140,46 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     tick();
   }, []);
 
+  /**
+   * Coolify path — the container is replaced by Coolify, so /api/update/status
+   * goes unreachable mid-update. Instead we poll /api/health every 3s, swallow
+   * connection errors / non-200s (that's the container swapping, not a failure),
+   * and declare success when the reported commit differs from the pre-update
+   * value. Time out after 10 minutes (the rebuild includes Chromium).
+   */
+  const pollCoolifyUntilRestarted = useCallback((preCommit: string) => {
+    if (pollingRef.current) return;
+    pollingRef.current = true;
+    const startedAt = Date.now();
+
+    const tick = async () => {
+      if (Date.now() - startedAt > COOLIFY_TIMEOUT) {
+        pollingRef.current = false;
+        setRestartStuck(true);
+        return;
+      }
+
+      try {
+        const r = await fetch("/api/health", { cache: "no-store" });
+        if (r.ok) {
+          const data = await r.json();
+          if (data.commit && preCommit && data.commit !== preCommit) {
+            // The new image is live — reload into it.
+            window.location.reload();
+            return;
+          }
+        }
+        // non-200 or unchanged commit → keep waiting.
+      } catch {
+        // connection error = container swapping — ignore and retry.
+      }
+
+      setTimeout(tick, 3000);
+    };
+
+    tick();
+  }, []);
+
   const installUpdate = useCallback(async () => {
     setInstalling(true);
     setRestartStuck(false);
@@ -150,6 +205,51 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     }
   }, [pollUntilRestarted]);
 
+  /** Coolify: perform the actual redeploy (called from the confirmation dialog). */
+  const doCoolifyUpdate = useCallback(async () => {
+    setConfirmOpen(false);
+    setInstalling(true);
+    setRestartStuck(false);
+    try {
+      // Capture the current commit so we can detect the new image landing.
+      let preCommit = "";
+      try {
+        const h = await fetch("/api/health", { cache: "no-store" }).then((r) =>
+          r.json()
+        );
+        preCommit = h.commit || "";
+      } catch {
+        preCommit = "";
+      }
+
+      const res = await fetch("/api/update", { method: "POST" });
+      const data = await res.json();
+
+      if (data.success && data.restarting) {
+        setInstalled(true);
+        setRestarting(true);
+        setRestartPhase("restarting");
+        toast.success(data.message || "Update started");
+        pollCoolifyUntilRestarted(preCommit);
+      } else {
+        toast.error(data.message || "Update failed");
+        setInstalling(false);
+      }
+    } catch {
+      toast.error("Failed to start update");
+      setInstalling(false);
+    }
+  }, [pollCoolifyUntilRestarted]);
+
+  /** Entry point shared by the collapsed icon and the expanded button. */
+  const requestUpdate = useCallback(() => {
+    if (isCoolify) {
+      setConfirmOpen(true);
+    } else {
+      installUpdate();
+    }
+  }, [isCoolify, installUpdate]);
+
   // Auto-check on mount + every 24 hours (silent — no error toasts)
   useEffect(() => {
     checkForUpdates(true);
@@ -159,7 +259,11 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
 
   const restartLabel = restartStuck
     ? "Update applied — restart the server, then reload"
+    : isCoolify
+    ? "Coolify is rebuilding the image…"
     : PHASE_LABELS[restartPhase] || "Updating…";
+
+  const showUpdate = !!(info?.updateAvailable && !installed && canApplyUpdate);
 
   // --- Collapsed: just an icon with a tooltip ---------------------------------
   if (collapsed) {
@@ -171,14 +275,14 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
               onClick={() =>
                 restarting
                   ? restartStuck && window.location.reload()
-                  : info?.updateAvailable && !installed
-                  ? installUpdate()
+                  : showUpdate
+                  ? requestUpdate()
                   : checkForUpdates()
               }
               disabled={checking || installing || (restarting && !restartStuck)}
               className={cn(
                 "w-full flex items-center justify-center py-2.5 rounded-lg transition-colors",
-                info?.updateAvailable && !installed
+                showUpdate
                   ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-400"
                   : "text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:text-gray-300 dark:hover:bg-gray-800"
               )}
@@ -189,7 +293,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
                 <RefreshCw className="h-5 w-5" />
               ) : checking || installing ? (
                 <Loader2 className="h-5 w-5 animate-spin" />
-              ) : info?.updateAvailable && !installed ? (
+              ) : showUpdate ? (
                 <ArrowDownCircle className="h-5 w-5" />
               ) : (
                 <Check className="h-4 w-4" />
@@ -203,8 +307,10 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
               ? "Checking for updates…"
               : installing
               ? "Installing update…"
-              : info?.updateAvailable && !installed
+              : showUpdate
               ? "Update available — click to install"
+              : info?.mode === "none"
+              ? "Updates are managed by your host"
               : `v${info?.currentVersion || "?"} — Up to date`}
           </TooltipContent>
         </Tooltip>
@@ -233,12 +339,20 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
             {restartLabel}
           </p>
           {restartStuck ? (
-            <button
-              onClick={() => window.location.reload()}
-              className="mt-1 w-full h-7 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium transition-colors"
-            >
-              Reload now
-            </button>
+            <>
+              {isCoolify && (
+                <p className="text-[10px] text-blue-500/70 dark:text-blue-400/50">
+                  The redeploy is taking a while — check your Coolify
+                  deployment logs for progress.
+                </p>
+              )}
+              <button
+                onClick={() => window.location.reload()}
+                className="mt-1 w-full h-7 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium transition-colors"
+              >
+                Reload now
+              </button>
+            </>
           ) : (
             <p className="text-[10px] text-blue-500/70 dark:text-blue-400/50">
               Don&apos;t close this tab — it&apos;ll reload automatically.
@@ -251,13 +365,17 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
 
   return (
     <div className="px-3 pb-2">
-      {info?.updateAvailable && !installed ? (
+      {showUpdate ? (
         /* Update available state */
         <div className="rounded-lg bg-emerald-50 dark:bg-emerald-950/30 p-3 space-y-2.5">
           <div className="flex items-center gap-2">
             <ArrowDownCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
             <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">
-              Update available
+              {isCoolify &&
+              info?.currentVersion &&
+              info?.latestVersion
+                ? `Update available (v${info.currentVersion} → v${info.latestVersion})`
+                : "Update available"}
             </span>
           </div>
 
@@ -281,7 +399,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
 
           <div className="flex gap-2">
             <button
-              onClick={installUpdate}
+              onClick={requestUpdate}
               disabled={installing}
               className="flex-1 flex items-center justify-center gap-1.5 h-8 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition-colors disabled:opacity-50"
             >
@@ -290,7 +408,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
               ) : (
                 <Download className="h-3.5 w-3.5" />
               )}
-              {installing ? "Installing…" : "Install Update"}
+              {installing ? "Updating…" : "Update now"}
             </button>
             <button
               onClick={() => checkForUpdates()}
@@ -304,7 +422,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
           </div>
         </div>
       ) : (
-        /* Up-to-date state */
+        /* Up-to-date / none state */
         <button
           onClick={() => checkForUpdates()}
           disabled={checking}
@@ -323,12 +441,18 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
                 ? "Checking…"
                 : installed
                 ? "Updated!"
+                : info?.mode === "none"
+                ? `v${info?.currentVersion || "?"}`
                 : info && info.canSelfUpdate === false
                 ? `v${info?.currentVersion || "?"}`
                 : `v${info?.currentVersion || "?"} — Up to date`}
             </p>
             {!checking &&
-              (info && info.canSelfUpdate === false ? (
+              (info?.mode === "none" ? (
+                <p className="text-[10px] text-gray-400 dark:text-gray-500 truncate">
+                  Updates are managed by your host
+                </p>
+              ) : info && info.canSelfUpdate === false ? (
                 <p className="text-[10px] text-gray-400 dark:text-gray-500 truncate">
                   Managed deployment — update via image redeploy
                 </p>
@@ -342,6 +466,42 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
           </div>
         </button>
       )}
+
+      {/* Confirmation dialog for the Coolify path */}
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Update Canolite?</DialogTitle>
+            <DialogDescription className="space-y-2 pt-1">
+              <span>
+                The app will restart and be briefly unavailable while Coolify
+                rebuilds the image.
+              </span>
+              <span>
+                Downtime typically takes several minutes because the rebuild
+                includes Chromium.
+              </span>
+              <span>
+                Any renders still in flight will be lost.
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <button
+              onClick={() => setConfirmOpen(false)}
+              className="h-8 px-3 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={doCoolifyUpdate}
+              className="h-8 px-3 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition-colors"
+            >
+              Update now
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
