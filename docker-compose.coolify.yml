@@ -1,0 +1,70 @@
+# ============================================================
+# Canolite — one-click Coolify deployment.
+#
+# In Coolify:
+#   New Resource → Application → Public Repository
+#   Repository:      https://github.com/AakashKhambhaliya/canolite
+#   Build strategy:  Compose
+#   Compose file:    docker-compose.coolify.yml
+#   → Deploy
+#
+# Everything else is declared here — the persistent volume, the port, and the
+# public URL — so there is nothing to set in the Storages tab. That tab is the
+# step people miss, and missing it means the app refuses to boot (on purpose:
+# without a real volume it would silently lose every template, API key and
+# render on the next redeploy).
+#
+# This pulls the prebuilt image, so there is no build step and no waiting for
+# Chromium to download. To build from source instead, use the Dockerfile build
+# strategy against this repo.
+# ============================================================
+services:
+  canolite:
+    image: ghcr.io/aakashkhambhaliya/canolite:latest
+
+    environment:
+      # Coolify substitutes the generated (or your custom) domain here and
+      # points its proxy at port 3000. APP_URL reuses it so the image URLs the
+      # API hands back resolve publicly instead of pointing at localhost.
+      - SERVICE_FQDN_CANOLITE_3000
+      - APP_URL=${SERVICE_FQDN_CANOLITE_3000}
+      #
+      # Optional — set both to skip the first-run setup wizard. They also act
+      # as a recovery net: if the admin row is ever lost, these restore it.
+      # - ADMIN_EMAIL=you@example.com
+      # - ADMIN_PASSWORD=change-me-please
+      #
+      # Do NOT add DATABASE_URL, here or in Coolify's environment panel, unless
+      # you are deliberately pointing at a real Postgres server. The image
+      # defaults to in-process PGlite under /app/data; a blank value overrides
+      # that default and relocates the database into the container, where it is
+      # destroyed on the next redeploy. Blank is worse than absent.
+
+    volumes:
+      # The single mount that holds all state: database, rendered images,
+      # uploads and backups. Declared here so Coolify creates it for you.
+      - canolite-data:/app/data
+
+    expose:
+      - "3000"
+
+    restart: unless-stopped
+
+    # The image already carries a HEALTHCHECK; repeating it here means Coolify
+    # uses it verbatim rather than warning that curl/wget is missing. Node is
+    # obviously present, so no extra packages are needed.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+volumes:
+  canolite-data:

@@ -47,7 +47,35 @@ docker run -d --name canolite -p 3000:3000 \
 
 ---
 
-## Coolify
+## Coolify — one-click (recommended)
+
+Everything is declared in `docker-compose.coolify.yml`: the persistent volume,
+the port, and the public URL. There is **nothing to configure in the Storages
+tab**, which is the step that is easiest to miss.
+
+1. **New Resource → Application → Public Repository**
+2. Repository: `https://github.com/AakashKhambhaliya/canolite`
+3. **Build strategy: `Compose`**
+4. **Compose file: `docker-compose.coolify.yml`**
+5. **Deploy**
+
+That pulls the prebuilt image, so there is no build step and no waiting for
+Chromium to download. Coolify creates the `/app/data` volume itself and assigns
+a domain; `APP_URL` follows it automatically.
+
+Optionally set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in Coolify's environment panel
+to skip the first-run setup wizard.
+
+> **Do not add a `DATABASE_URL` variable** unless you are deliberately pointing
+> at a real Postgres server. Blank is worse than absent — an empty value
+> overrides the image default and relocates the database into the container.
+
+---
+
+## Coolify — building from source
+
+Use this if you want Coolify to rebuild the image from the repository on every
+deploy, rather than pulling the published one.
 
 1. **New Resource → Application.** Pick your Git repository (or *Public
    Repository* and paste `https://github.com/AakashKhambhaliya/canolite`).

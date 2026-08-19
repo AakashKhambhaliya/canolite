@@ -4,6 +4,29 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.6.8
+
+One-click Coolify install. Adds `docker-compose.coolify.yml`, which declares
+the persistent volume, the port and the public URL, so installing is:
+
+1. New Resource → Application → Public Repository
+2. Repository: `https://github.com/AakashKhambhaliya/canolite`
+3. Build strategy: **Compose**, compose file: `docker-compose.coolify.yml`
+4. Deploy
+
+Nothing to set in the Storages tab. That tab was the whole problem: forgetting
+it meant the app refused to boot — correctly, since without a real volume it
+would silently lose every template, API key and render on the next redeploy —
+but the failure surfaced as an unexplained "unhealthy, rolling back" deploy.
+Declaring the volume in the compose file removes the chance to get it wrong.
+
+It pulls the prebuilt image, so there is no build step and no waiting for
+Chromium to download. Coolify assigns the domain and `APP_URL` follows it. The
+Dockerfile strategy still works for building from source, and is documented
+alongside it.
+
+No runtime changes.
+
 ## v1.6.7
 
 Documentation correction. No runtime changes since v1.6.6.

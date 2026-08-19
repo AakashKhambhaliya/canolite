@@ -45,7 +45,14 @@ Point it at a domain (with HTTPS via your own reverse proxy) like so:
 curl -fsSL https://raw.githubusercontent.com/AakashKhambhaliya/canolite/main/install.sh | DOMAIN=canolite.example.com bash
 ```
 
-Hosting on **Coolify**, **Dokploy**, or want manual Docker/VPS steps? See
+### Coolify (one-click)
+
+Paste the repo URL, pick **Compose** as the build strategy and
+`docker-compose.coolify.yml` as the file, then deploy. The persistent volume,
+port and public URL are all declared in that file — nothing to wire up by hand,
+and no build step (it pulls the prebuilt image).
+
+Hosting on **Dokploy**, or want manual Docker/VPS steps? See
 **[DEPLOY.md](./DEPLOY.md)**.
 
 ### Local development
