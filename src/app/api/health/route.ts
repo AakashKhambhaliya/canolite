@@ -3,6 +3,9 @@ import path from "path";
 import fs from "fs";
 
 function getVersion(): string {
+  // Prefer the version baked into the image at build time, so /api/health and
+  // /api/update can never disagree about what is actually running.
+  if (process.env.APP_VERSION) return process.env.APP_VERSION;
   try {
     const pkg = JSON.parse(
       fs.readFileSync(path.join(process.cwd(), "package.json"), "utf-8")

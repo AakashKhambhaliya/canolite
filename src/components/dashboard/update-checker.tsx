@@ -67,13 +67,20 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
   const checkForUpdates = useCallback(async (silent = false) => {
     setChecking(true);
     try {
-      const res = await fetch("/api/update");
+      // A manual check bypasses the server's 12h release cache so a freshly
+      // published version shows up right away; the automatic one honours it.
+      const res = await fetch(silent ? "/api/update" : "/api/update?force=1");
       const data = await res.json();
       setInfo(data);
       // Only surface errors for manual checks — the automatic check shouldn't
       // spam toasts (e.g. Docker deploys have no .git so it always "fails").
       if (data.error && !silent) {
         toast.error("Update check failed: " + data.error);
+      } else if (data.checkStatus === "unknown" && !silent) {
+        // Don't let a failed lookup masquerade as "up to date".
+        toast.error(
+          "Couldn't reach GitHub to check for updates — try again shortly."
+        );
       }
     } catch (e) {
       if (!silent) toast.error("Failed to check for updates");

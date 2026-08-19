@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { execSync } from "child_process";
+import { execFile } from "child_process";
 import path from "path";
 import fs from "fs";
 import { getCurrentUser } from "@/lib/auth";
@@ -24,24 +24,36 @@ const GITHUB_RELEASES =
   "https://api.github.com/repos/AakashKhambhaliya/canolite/releases/latest";
 const CHECK_TTL = 12 * 60 * 60 * 1000; // 12 hours
 
-function run(cmd: string): string {
-  try {
-    return execSync(cmd, { cwd: ROOT, timeout: 30_000 }).toString().trim();
-  } catch (e: any) {
-    return e.stderr?.toString?.().trim() || e.message || "";
-  }
+/**
+ * Run a git command off the event loop. Returns null when the command fails
+ * (non-zero exit, git missing, timeout) so callers can tell "no answer" apart
+ * from a real result — the previous version returned stderr as though it were
+ * output, which made a failed fetch look like a different commit. It also ran
+ * synchronously, so every dashboard load blocked the server on a network fetch.
+ */
+function run(args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("git", args, { cwd: ROOT, timeout: 30_000 }, (err, stdout) =>
+      resolve(err ? null : stdout.toString().trim())
+    );
+  });
 }
 
-function getLocalCommit(): string {
-  return run("git rev-parse HEAD");
+/** A resolved commit is always a full 40-char SHA; anything else is an error. */
+const SHA_RE = /^[0-9a-f]{40}$/i;
+
+async function getLocalCommit(): Promise<string | null> {
+  const out = await run(["rev-parse", "HEAD"]);
+  return out && SHA_RE.test(out) ? out : null;
 }
 
-function getRemoteCommit(): string {
-  // Fetch latest without modifying working tree
-  run("git fetch origin --quiet");
-  // Get the default branch name
-  const branch = run("git rev-parse --abbrev-ref HEAD") || "main";
-  return run(`git rev-parse origin/${branch}`);
+async function getRemoteCommit(): Promise<string | null> {
+  // Fetch latest without modifying the working tree. A failed fetch isn't fatal
+  // on its own — origin/<branch> may still resolve from an earlier fetch.
+  await run(["fetch", "origin", "--quiet"]);
+  const branch = (await run(["rev-parse", "--abbrev-ref", "HEAD"])) || "main";
+  const out = await run(["rev-parse", `origin/${branch}`]);
+  return out && SHA_RE.test(out) ? out : null;
 }
 
 interface LastCheck {
@@ -67,13 +79,9 @@ function setLastCheck(lc: LastCheck): void {
   } catch {}
 }
 
-function getCommitLog(from: string, to: string): string[] {
-  try {
-    const log = run(`git log --oneline ${from}..${to} --format="%s"`);
-    return log ? log.split("\n").filter(Boolean) : [];
-  } catch {
-    return [];
-  }
+async function getCommitLog(from: string, to: string): Promise<string[]> {
+  const log = await run(["log", "--format=%s", `${from}..${to}`]);
+  return log ? log.split("\n").filter(Boolean) : [];
 }
 
 function getVersion(): string {
@@ -90,10 +98,13 @@ function getVersion(): string {
 /** Minimal semver parsing/comparison — never reports an update when the
  *  versions can't be parsed (avoids false positives from pre-release tags). */
 function parseVersion(v: string): number[] | null {
+  // Anchored at both ends on purpose: "1.6.0-rc.1" must NOT parse as 1.6.0,
+  // or a pre-release would be advertised as a stable update — which is exactly
+  // what the doc comment above promises does not happen.
   const m = String(v)
     .replace(/^v/i, "")
     .trim()
-    .match(/^(\d+)\.(\d+)\.(\d+)/);
+    .match(/^(\d+)\.(\d+)\.(\d+)$/);
   if (!m) return null;
   return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
@@ -114,12 +125,20 @@ function isNewer(latest: string, current: string): boolean {
  * on rate limiting or network failure — never a false positive. A failed check
  * is NOT cached, so a later check retries.
  */
-async function getLatestReleaseVersion(): Promise<{
+async function getLatestReleaseVersion(force = false): Promise<{
   version: string | null;
   status: "ok" | "unknown";
 }> {
   const last = getLastCheck();
-  if (last.timestamp > 0 && Date.now() - last.timestamp < CHECK_TTL) {
+  // Only a cached entry that actually holds a version counts as a hit. An older
+  // build (and the git path) wrote a timestamp with latestVersion null, which
+  // was then served for 12h as a confident "you are up to date".
+  if (
+    !force &&
+    last.latestVersion &&
+    last.timestamp > 0 &&
+    Date.now() - last.timestamp < CHECK_TTL
+  ) {
     return { version: last.latestVersion, status: "ok" };
   }
 
@@ -147,7 +166,7 @@ async function getLatestReleaseVersion(): Promise<{
 /**
  * GET /api/update — Check for updates
  */
-export async function GET() {
+export async function GET(request: Request) {
   // Admin only — this shells out to git and reads repo state.
   const user = await getCurrentUser();
   if (!user) {
@@ -155,12 +174,15 @@ export async function GET() {
   }
 
   const mode = updateMode();
+  // A manual "check now" sends force=1 so a freshly published release appears
+  // immediately; the automatic 24h check honours the cache (GitHub rate limits).
+  const force = new URL(request.url).searchParams.get("force") === "1";
 
   // Image-based deploys (Coolify / Docker) have no git checkout: compare the
   // running version against the latest GitHub release instead.
   if (mode !== "git") {
     const currentVersion = process.env.APP_VERSION || getVersion();
-    const { version: latest, status } = await getLatestReleaseVersion();
+    const { version: latest, status } = await getLatestReleaseVersion(force);
     const updateAvailable = latest ? isNewer(latest, currentVersion) : false;
 
     return NextResponse.json({
@@ -179,15 +201,34 @@ export async function GET() {
   }
 
   try {
-    const localCommit = getLocalCommit();
-    const remoteCommit = getRemoteCommit();
+    const prev = getLastCheck();
+    const localCommit = await getLocalCommit();
+    const remoteCommit = await getRemoteCommit();
+
+    // Couldn't resolve both sides (offline, no origin remote, detached HEAD) —
+    // report that, instead of reading the failure as "a new commit is waiting".
+    if (!localCommit || !remoteCommit) {
+      return NextResponse.json({
+        updateAvailable: false,
+        currentVersion: getVersion(),
+        localCommit: localCommit ? localCommit.slice(0, 7) : "",
+        remoteCommit: "",
+        changes: [],
+        lastCheck: prev.timestamp,
+        checkedAt: Date.now(),
+        canSelfUpdate: isGitCheckout(),
+        mode,
+        checkStatus: "unknown",
+      });
+    }
+
     const updateAvailable = localCommit !== remoteCommit;
     const changes = updateAvailable
-      ? getCommitLog(localCommit, remoteCommit)
+      ? await getCommitLog(localCommit, remoteCommit)
       : [];
-    const lastCheck = getLastCheck().timestamp;
 
-    setLastCheck({ timestamp: Date.now(), latestVersion: null });
+    // Preserve any cached release version — this path never looks one up.
+    setLastCheck({ timestamp: Date.now(), latestVersion: prev.latestVersion });
 
     return NextResponse.json({
       updateAvailable,
@@ -195,8 +236,9 @@ export async function GET() {
       localCommit: localCommit.slice(0, 7),
       remoteCommit: remoteCommit.slice(0, 7),
       changes,
-      lastCheck,
+      lastCheck: prev.timestamp,
       checkedAt: Date.now(),
+      checkStatus: "ok",
       // Whether the in-app updater can apply this (a git checkout). Pure Docker
       // image deploys update by pulling a new image / redeploying.
       canSelfUpdate: isGitCheckout(),
@@ -264,7 +306,19 @@ export async function POST() {
     );
   }
 
-  // Pre-flight 2: back up the database before changing anything.
+  // Pre-flight 2: refuse if an update is already in flight. This has to come
+  // before the backup — otherwise every repeat click writes another full copy
+  // of the database only to then be told the update is already running.
+  if (isUpdateInFlight()) {
+    return NextResponse.json({
+      success: true,
+      restarting: true,
+      mode,
+      message: "An update is already in progress.",
+    });
+  }
+
+  // Pre-flight 3: back up the database before changing anything.
   try {
     const { createBackup } = await import("@/lib/backup");
     await createBackup("pre-update");
@@ -273,16 +327,6 @@ export async function POST() {
       "[backup] Pre-update backup skipped:",
       e instanceof Error ? e.message : e
     );
-  }
-
-  // Pre-flight 3: refuse if an update is already in flight.
-  if (isUpdateInFlight()) {
-    return NextResponse.json({
-      success: true,
-      restarting: true,
-      mode,
-      message: "An update is already in progress.",
-    });
   }
 
   if (mode === "coolify") {

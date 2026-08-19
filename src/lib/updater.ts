@@ -140,6 +140,9 @@ export async function triggerCoolifyDeploy(): Promise<{
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ uuid, force: false }),
+      // Without this an unreachable-but-accepting Coolify hangs POST /api/update
+      // forever, leaving the status file stuck on "restarting" for 20 minutes.
+      signal: AbortSignal.timeout(30_000),
     });
   } catch (e) {
     return {
