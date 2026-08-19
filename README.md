@@ -21,7 +21,7 @@
 - 📈 **Render Logs** — Track, retry, and delete renders
 - ⚙️ **Per-project defaults** — Default format/quality/scale + configurable **render retention** with automatic cleanup
 - 🔒 **Single-admin auth** — One-time setup wizard, no public sign-up
-- 🔄 **Self-update checker** — One-click "check & install update" for git-based deployments
+- 🔄 **Self-update checker** — One-click updates (git self-update, or Coolify redeploy)
 - ⚡ **Runs without Docker** — Self-contained on plain Node (in-process DB + local storage), or point it at an external **PostgreSQL**
 
 ---
@@ -68,10 +68,12 @@ That's it. By default Canolite runs **fully self-contained** with no external
 services:
 
 - **Database** → in-process [PGlite](https://pglite.dev) (WASM Postgres), persisted to `./.pglite`
-- **Storage** → local filesystem under `public/storage`
+- **Storage** → local filesystem under `public/storage` (or `STORAGE_DIR`)
 - **Rendering** → synchronous, in-process (headless Chromium + Sharp)
 
-Schema migration and demo data are applied automatically on first boot.
+Schema migrations run automatically on boot, with an automatic backup taken
+before any pending migration. Demo data is only inserted in development (set
+`SEED_DEMO_DATA=true` to opt in elsewhere).
 
 ### Run with Docker
 
@@ -81,9 +83,9 @@ Prefer containers? The whole app runs in one self-contained image:
 docker compose up -d --build
 ```
 
-Persist the two volumes (`/app/data` for the database, `/app/public/storage` for
-images), set `APP_URL` to your public URL, and open the app. Full guides for
-**Coolify**, **Dokploy**, and a **bare VPS** are in **[DEPLOY.md](./DEPLOY.md)**.
+Persist the single `/app/data` volume (database + images + backups), set
+`APP_URL` to your public URL, and open the app. Full guides for **Coolify**,
+**Dokploy**, and a **bare VPS** are in **[DEPLOY.md](./DEPLOY.md)**.
 
 ### Optional: external PostgreSQL
 
@@ -252,7 +254,7 @@ Create a **Canolite API** credential in n8n with:
 ## Deployment
 
 Canolite runs as a **single self-contained container** (PGlite + local storage +
-Chromium). Persist `/app/data` and `/app/public/storage`, set `APP_URL`, expose
+Chromium). Persist the single `/app/data` volume, set `APP_URL`, expose
 port `3000`, and you're done.
 
 See **[DEPLOY.md](./DEPLOY.md)** for step-by-step guides for **Coolify**,
