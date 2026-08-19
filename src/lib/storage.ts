@@ -9,7 +9,8 @@
 import { promises as fs } from "fs";
 import path from "path";
 
-const STORAGE_ROOT = path.join(process.cwd(), "public", "storage");
+const STORAGE_ROOT =
+  process.env.STORAGE_DIR || path.join(process.cwd(), "public", "storage");
 const BUCKET = process.env.S3_BUCKET || "canolite";
 
 function appUrl(): string {
@@ -28,6 +29,48 @@ function pathForKey(key: string): string {
 
 export async function ensureBucket(): Promise<void> {
   await fs.mkdir(STORAGE_ROOT, { recursive: true });
+}
+
+/**
+ * One-time migration from the legacy storage location to the configured
+ * `STORAGE_DIR`. Only runs when `STORAGE_DIR` is set and points somewhere other
+ * than the legacy `public/storage` — and only when the legacy directory is
+ * non-empty while the target is empty (or absent). Idempotent: once the target
+ * is populated it is never touched again, and fresh installs (empty legacy dir)
+ * are skipped entirely.
+ */
+export async function migrateLegacyStorage(): Promise<void> {
+  const storageDir = process.env.STORAGE_DIR;
+  if (!storageDir) return; // default local-dev layout — nothing to migrate
+
+  const legacyRoot = path.join(process.cwd(), "public", "storage");
+  const targetRoot = path.resolve(storageDir);
+  if (path.resolve(legacyRoot) === targetRoot) return;
+
+  let legacyIsDir = false;
+  try {
+    legacyIsDir = (await fs.stat(legacyRoot)).isDirectory();
+  } catch {
+    return; // no legacy directory — fresh install
+  }
+  if (!legacyIsDir) return;
+
+  const legacyEntries = await fs.readdir(legacyRoot);
+  if (legacyEntries.length === 0) return; // nothing to move
+
+  try {
+    const targetEntries = await fs.readdir(targetRoot);
+    if (targetEntries.length > 0) return; // target already populated
+  } catch {
+    // target doesn't exist yet — fine, we'll create it
+  }
+
+  console.log(
+    `[storage] Migrating legacy storage ${legacyRoot} → ${targetRoot} ` +
+      `(${legacyEntries.length} entries)`
+  );
+  await fs.cp(legacyRoot, targetRoot, { recursive: true });
+  console.log("[storage] Legacy storage migration complete.");
 }
 
 /** Resolve a storage key to its absolute filesystem path (traversal-checked). */

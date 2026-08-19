@@ -1,8 +1,9 @@
 # ============================================================
 # Canolite — self-contained single-container deployment.
 #
-# In-process PGlite database + local filesystem storage. The only thing you
-# must persist is the two volumes below. Ideal for a VPS, Coolify, or Dokploy.
+# In-process PGlite database + local filesystem storage. All state (database,
+# rendered images, uploads, backups) lives under /app/data — persist that ONE
+# volume and you persist everything. Ideal for a VPS, Coolify, or Dokploy.
 #
 #   docker compose up -d --build
 #
@@ -26,10 +27,8 @@ services:
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
     volumes:
-      - canolite_data:/app/data # PGlite database
-      - canolite_storage:/app/public/storage # rendered images + uploads
+      - canolite_data:/app/data # database + storage + backups (all state)
     restart: unless-stopped
 
 volumes:
   canolite_data:
-  canolite_storage:

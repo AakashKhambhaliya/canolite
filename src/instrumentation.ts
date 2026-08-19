@@ -6,7 +6,13 @@ export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { ensureDb } = await import("@/db");
     await ensureDb();
-    const { ensureBucket } = await import("@/lib/storage");
+
+    const { ensureBucket, migrateLegacyStorage } = await import(
+      "@/lib/storage"
+    );
+    // One-time move of any files left at the legacy `public/storage` location
+    // into the configured STORAGE_DIR, before we create/use the bucket.
+    await migrateLegacyStorage();
     await ensureBucket();
 
     // Run cleanup on boot + every hour, honoring each project's retention.

@@ -2,9 +2,8 @@
 # Canolite — production image
 #
 # Self-contained by default: in-process PGlite database + local filesystem
-# storage + headless-Chromium rendering. Mount volumes at /app/data and
-# /app/public/storage to persist data. Point DATABASE_URL at Postgres to use
-# Postgres instead.
+# storage + headless-Chromium rendering. Mount a single volume at /app/data to
+# persist all state. Point DATABASE_URL at Postgres to use Postgres instead.
 # ============================================================
 
 FROM node:24-bookworm-slim AS base
@@ -29,7 +28,8 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    DATABASE_URL=pglite:///app/data/pglite
+    DATABASE_URL=pglite:///app/data/pglite \
+    STORAGE_DIR=/app/data/storage
 
 # Production deps, then download Chromium + its system libraries.
 COPY package.json package-lock.json* ./
@@ -44,8 +44,9 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/drizzle ./drizzle
 COPY --from=builder /app/next.config.mjs ./next.config.mjs
 
-# Writable data dirs (PGlite DB + rendered images / uploads). Mount volumes here.
-RUN mkdir -p /app/data/pglite /app/public/storage
+# Writable data dirs (PGlite DB + rendered images / uploads + backups). Mount a
+# volume at /app/data to persist everything — the app keeps all state under it.
+RUN mkdir -p /app/data/pglite /app/data/storage /app/data/backups
 
 EXPOSE 3000
 

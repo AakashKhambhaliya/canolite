@@ -3,7 +3,7 @@
 #
 # Use this if you'd rather run a real Postgres than the in-process PGlite
 # (e.g. you already operate Postgres backups). Rendered images are still stored
-# on local disk, so the storage volume is still required.
+# on local disk under /app/data, so the data volume is still required.
 #
 #   docker compose -f docker-compose.full.yml up -d --build
 # ============================================================
@@ -19,7 +19,7 @@ services:
       # - ADMIN_EMAIL=you@example.com
       # - ADMIN_PASSWORD=change-me-please
     volumes:
-      - canolite_storage:/app/public/storage # rendered images + uploads
+      - canolite_data:/app/data # rendered images + uploads + backups
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,5 +41,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  canolite_storage:
+  canolite_data:
   postgres_data:

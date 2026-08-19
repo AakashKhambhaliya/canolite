@@ -8,7 +8,7 @@ You only need to persist two paths and set one env var.
 |------|-------|
 | Port | `3000` |
 | Health check | `GET /api/health` → `{"status":"ok"}` |
-| Persist | `/app/data` (database) and `/app/public/storage` (rendered images + uploads) |
+| Persist | `/app/data` (database + rendered images + uploads + backups) |
 | Required env | `APP_URL` = the public URL of your instance (e.g. `https://canolite.example.com`) |
 | Optional env | `ADMIN_EMAIL` + `ADMIN_PASSWORD` (auto-create admin and skip the setup wizard) |
 
@@ -37,7 +37,6 @@ with plain Docker:
 docker run -d --name canolite -p 3000:3000 \
   -e APP_URL=https://canolite.example.com \
   -v canolite_data:/app/data \
-  -v canolite_storage:/app/public/storage \
   ghcr.io/aakashkhambhaliya/canolite:latest
 ```
 
@@ -53,9 +52,8 @@ docker run -d --name canolite -p 3000:3000 \
    Repository* and paste `https://github.com/AakashKhambhaliya/canolite`).
 2. **Build Pack: `Dockerfile`.** Coolify auto-detects the `Dockerfile` in the repo root.
 3. **Port:** set the exposed port to `3000`.
-4. **Persistent Storage** (Storages tab) — add two volume mounts:
+4. **Persistent Storage** (Storages tab) — add one volume mount:
    - `/app/data`
-   - `/app/public/storage`
 5. **Environment variables:**
    - `APP_URL` = `https://your-domain` (your Coolify domain for this app)
    - *(optional)* `ADMIN_EMAIL`, `ADMIN_PASSWORD`
@@ -73,9 +71,8 @@ docker run -d --name canolite -p 3000:3000 \
 1. **Create → Application**, choose **Provider: Git** and your repo (or a public
    URL).
 2. **Build Type: `Dockerfile`.**
-3. **Advanced → Volumes / Mounts** — add two persistent mounts:
+3. **Advanced → Volumes / Mounts** — add one persistent mount:
    - `/app/data`
-   - `/app/public/storage`
 4. **Environment:** `APP_URL=https://your-domain` (+ optional admin vars).
 5. **Domains:** add your domain, container port `3000` (Dokploy/Traefik handles TLS).
 6. **Deploy** → open the domain → setup wizard.
@@ -123,7 +120,8 @@ APP_URL=https://canolite.example.com PORT=3000 npm run start
 
 Keep it running with **pm2** or a **systemd** unit, and reverse-proxy for TLS.
 The PGlite database lives in `./.pglite` and images in `./public/storage` — back
-those up.
+those up (or set `STORAGE_DIR=/app/data/storage` to keep everything in one
+place).
 
 ---
 
