@@ -16,11 +16,17 @@ export function generateApiKey(): {
   return { fullKey, prefix, hash };
 }
 
+/**
+ * Async on purpose: bcrypt at cost 10 takes ~60-100ms, and `compareSync` spends
+ * all of it blocking the event loop — on every single public API request, where
+ * it stalls every other in-flight render and response. `compare` hands the work
+ * to the thread pool instead.
+ */
 export function verifyApiKey(
   presentedKey: string,
   storedHash: string
-): boolean {
-  return bcrypt.compareSync(presentedKey, storedHash);
+): Promise<boolean> {
+  return bcrypt.compare(presentedKey, storedHash);
 }
 
 export function extractPrefix(key: string): string {

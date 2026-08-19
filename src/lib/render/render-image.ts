@@ -111,6 +111,29 @@ async function getBrowser(): Promise<Browser> {
   return globalForBrowser.__canoliteBrowserPromise;
 }
 
+/**
+ * Hard ceiling on a single render. `page.evaluate()` has no timeout of its own
+ * and is not covered by Playwright's default timeouts, so a design that makes
+ * fabric's loadFromJSON never settle would hang forever: the job stays
+ * "processing" for good, its page is never closed, and it holds one of the
+ * worker's RENDER_CONCURRENCY slots permanently. Enough of those and rendering
+ * stops entirely until someone restarts the process.
+ */
+const RENDER_TIMEOUT_MS = Number(process.env.RENDER_TIMEOUT_MS || 60_000);
+
+function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    work,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} after ${Math.round(ms / 1000)}s`)),
+        ms
+      );
+    }),
+  ]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 export interface RenderOptions {
   designJson: any;
   width: number;
@@ -148,6 +171,8 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
     viewport: { width: 16, height: 16 },
     deviceScaleFactor: 1,
   });
+  page.setDefaultTimeout(RENDER_TIMEOUT_MS);
+  page.setDefaultNavigationTimeout(RENDER_TIMEOUT_MS);
 
   try {
     // <base> lets relative storage URLs (/storage/...) in the design and fonts
@@ -164,7 +189,7 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
       { waitUntil: "load" }
     );
 
-    const dataUrl: string = await page.evaluate(
+    const renderInPage = page.evaluate(
       async ({ designJson, width, height, scale, background, families }) => {
         // @ts-ignore — fabric is injected globally
         const f = (window as any).fabric;
@@ -208,6 +233,13 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
       }
     );
 
+    // Bound the in-page work — page.evaluate() has no timeout of its own.
+    const dataUrl: string = await withTimeout(
+      renderInPage,
+      RENDER_TIMEOUT_MS,
+      "Render timed out"
+    );
+
     const base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
     const pngBuffer = Buffer.from(base64, "base64");
 
@@ -234,6 +266,8 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
     const buffer = await pipeline.toBuffer();
     return { buffer, contentType, ext };
   } finally {
-    await page.close();
+    // Never let a close failure replace the real error — and on the timeout
+    // path this is what actually tears down the runaway page.
+    await page.close().catch(() => {});
   }
 }

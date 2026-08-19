@@ -34,7 +34,7 @@ export async function authenticateApiKey(
     .where(and(eq(apiKeys.keyPrefix, prefix), isNull(apiKeys.revokedAt)));
 
   for (const key of candidateKeys) {
-    if (verifyApiKey(token, key.keyHash)) {
+    if (await verifyApiKey(token, key.keyHash)) {
       // Update last used
       await db
         .update(apiKeys)

@@ -470,15 +470,19 @@ console.log("\n5. API Key generation\n");
 
 import { generateApiKey, verifyApiKey, extractPrefix } from "../../src/lib/api-keys";
 
-{
+// Async: verifyApiKey now hands bcrypt to the thread pool instead of blocking.
+async function apiKeyTests() {
   const { fullKey, prefix, hash } = generateApiKey();
   assert(fullKey.startsWith("sk_live_"), `Key starts with sk_live_: ${fullKey.substring(0, 20)}...`);
   assert(fullKey.length > 30, "Key has sufficient length");
   assert(prefix.length === 12, `Prefix is 12 chars: ${prefix}`);
   assert(prefix === fullKey.substring(0, 12), "Prefix matches key start");
   assert(hash.startsWith("$2"), "Hash is bcrypt");
-  assert(verifyApiKey(fullKey, hash), "Key verifies against its hash");
-  assert(!verifyApiKey("sk_live_wrong_key_here_bad", hash), "Wrong key does NOT verify");
+  assert(await verifyApiKey(fullKey, hash), "Key verifies against its hash");
+  assert(
+    !(await verifyApiKey("sk_live_wrong_key_here_bad", hash)),
+    "Wrong key does NOT verify"
+  );
   assertEqual(extractPrefix(fullKey), prefix, "extractPrefix matches");
 }
 
@@ -639,7 +643,7 @@ import {
 // =============================================================
 // RESULTS
 // =============================================================
-renderFontTests().then(() => {
+renderFontTests().then(apiKeyTests).then(() => {
   console.log("\n================================================================");
   console.log(`  RESULTS: ${passed} passed, ${failed} failed`);
   console.log("================================================================");
