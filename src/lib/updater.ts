@@ -272,6 +272,23 @@ async function runUpdate(): Promise<void> {
     if (/package(-lock)?\.json/.test(changed)) {
       writeStatus({ phase: "installing", message: "Installing dependencies…" });
       await sh("npm install --no-audit --no-fund");
+
+      // Playwright pins each library version to a specific browser build, so a
+      // version bump leaves the previously downloaded Chromium unusable:
+      //   Executable doesn't exist at …/chromium_headless_shell-<build>/…
+      // Rendering then fails on every request until someone SSHes in and runs
+      // the install by hand. Re-download the browser as part of the update.
+      // Not --with-deps: that needs apt/root, and the system libraries are
+      // already present from the initial install. Non-fatal — a failure here
+      // shouldn't roll back an otherwise good update.
+      writeStatus({ message: "Updating the headless browser…" });
+      await sh("npx playwright install chromium", 15 * 60_000).catch((e) => {
+        console.warn(
+          "[update] playwright install failed — rendering may need " +
+            "`npx playwright install chromium` run manually:",
+          e instanceof Error ? e.message : e
+        );
+      });
     }
 
     // Rebuild so `next start` serves the new code. Without this the running
