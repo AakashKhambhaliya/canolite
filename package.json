@@ -1,6 +1,6 @@
 {
   "name": "canolite",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "private": true,
   "license": "MIT",
   "scripts": {
@@ -46,12 +46,12 @@
     "drizzle-orm": "^0.45.2",
     "fabric": "^6.6.1",
     "lucide-react": "^1.17.0",
-    "next": "15.5.19",
+    "next": "^15.5.23",
     "pg": "^8.21.0",
     "playwright": "1.60.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.3",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
     "tw-animate-css": "^1.2.0",
