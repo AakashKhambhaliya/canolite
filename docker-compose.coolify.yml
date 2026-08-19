@@ -14,20 +14,16 @@
 # without a real volume it would silently lose every template, API key and
 # render on the next redeploy).
 #
-# On x86-64 this pulls the prebuilt image. On ARM64 (Oracle Ampere, Graviton,
-# Raspberry Pi) no prebuilt image exists yet, so it builds from source instead —
-# a few minutes, fully automatic, no configuration change needed.
+# The image is published for linux/amd64 and linux/arm64, so this behaves the
+# same on an Intel/AMD VPS as on Oracle Ampere, AWS Graviton or a Raspberry Pi:
+# it pulls a prebuilt image. No build step, nothing to change per architecture.
 # ============================================================
 services:
   canolite:
+    # Published for linux/amd64 and linux/arm64, so this pulls the right image
+    # on an Intel/AMD VPS and equally on Oracle Ampere, AWS Graviton or a
+    # Raspberry Pi. No build step on any of them.
     image: ghcr.io/aakashkhambhaliya/canolite:latest
-    # Build from source when no prebuilt image matches this machine. The
-    # published image is linux/amd64 only, so on an ARM64 host (Oracle Ampere,
-    # AWS Graviton, Raspberry Pi) a pull fails with:
-    #   no matching manifest for linux/arm64/v8 in the manifest list entries
-    # With a build section, Compose builds locally instead — a few minutes,
-    # and it produces an image native to the host.
-    build: .
 
     environment:
       # Coolify injects COOLIFY_FQDN into the compose environment (you can see

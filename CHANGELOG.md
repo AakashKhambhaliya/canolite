@@ -4,6 +4,34 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.7.0
+
+**Canolite now installs on ARM64 servers.**
+
+The published image was `linux/amd64` only. On an ARM64 host — Oracle Ampere
+(including the Always Free tier), AWS Graviton, Hetzner ARM, a Raspberry Pi —
+pulling it failed outright:
+
+```
+no matching manifest for linux/arm64/v8 in the manifest list entries
+```
+
+The only way through was to build from source on the server every deploy.
+
+`:latest` and every `v*` tag are now multi-architecture manifest lists covering
+**linux/amd64 and linux/arm64**, so Docker pulls the right image automatically
+and no host builds from source any more. Each architecture is built on a native
+runner rather than under QEMU emulation, which keeps CI to minutes instead of
+the better part of an hour.
+
+`docker-compose.coolify.yml` drops the temporary `build:` fallback added in
+v1.6.9 — with real ARM images published, every platform pulls.
+
+Nothing to change in an existing install: pull `:latest` (or update in-app) and
+you get the image matching your architecture.
+
+No runtime code changes.
+
 ## v1.6.9
 
 Fixes the one-click Coolify compose file on ARM64 hosts.
