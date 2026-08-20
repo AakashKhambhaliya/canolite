@@ -37,7 +37,14 @@ coverage/
 # Misc
 *.tsbuildinfo
 
-# Local self-contained data (PGlite DB + backups, rendered images, uploads)
+# Local self-contained data (embedded PostgreSQL + backups, rendered images, uploads)
+# Ignore the whole runtime data dir, not just the default PGDATA_DIR. PGDATA_DIR
+# is configurable, so a cluster left under any other name in data/ (e.g. from
+# PGDATA_DIR=./data/pgdata-preview) was NOT ignored — that is a live database,
+# thousands of binary files, one `git add .` away from a public repo.
+data/
+data/pgdata/
+data/pg-credentials.json
 .pglite
 .pglite.*
 public/storage/

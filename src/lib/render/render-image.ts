@@ -11,6 +11,8 @@ import path from "path";
 import sharp from "sharp";
 import type { Browser } from "playwright";
 import googleFontsRaw from "@/lib/editor/google-fonts.json";
+import { walkDesignObjects } from "@/lib/design/walk";
+import { config } from "@/lib/config";
 
 interface GoogleFontMeta {
   family: string;
@@ -28,13 +30,9 @@ export interface CustomFontRef {
 // Collect every fontFamily referenced in a design (recursing into groups).
 function collectFamilies(designJson: any): string[] {
   const set = new Set<string>();
-  const walk = (objs: any[]) => {
-    for (const o of objs || []) {
-      if (o?.fontFamily) set.add(o.fontFamily);
-      if (o?.objects) walk(o.objects);
-    }
-  };
-  walk(designJson?.objects || []);
+  walkDesignObjects(designJson, ({ object: o }) => {
+    if (o?.fontFamily) set.add(o.fontFamily);
+  });
   return Array.from(set);
 }
 
@@ -68,7 +66,7 @@ export function buildFontHead(families: string[], customFonts: CustomFontRef[]):
 
 // Inline the Fabric browser build into the render page once.
 let fabricSource: string | null = null;
-async function getFabricSource(): Promise<string> {
+export async function getFabricSource(): Promise<string> {
   if (fabricSource) return fabricSource;
   const p = path.join(process.cwd(), "node_modules", "fabric", "dist", "index.min.js");
   fabricSource = await fs.readFile(p, "utf8");
@@ -81,7 +79,7 @@ const globalForBrowser = globalThis as unknown as {
   __canoliteBrowserPromise?: Promise<Browser>;
 };
 
-async function getBrowser(): Promise<Browser> {
+export async function getBrowser(): Promise<Browser> {
   if (globalForBrowser.__canoliteBrowser?.isConnected()) {
     return globalForBrowser.__canoliteBrowser;
   }
@@ -133,7 +131,7 @@ async function getBrowser(): Promise<Browser> {
  * worker's RENDER_CONCURRENCY slots permanently. Enough of those and rendering
  * stops entirely until someone restarts the process.
  */
-const RENDER_TIMEOUT_MS = Number(process.env.RENDER_TIMEOUT_MS || 60_000);
+const RENDER_TIMEOUT_MS = config.RENDER_TIMEOUT_MS;
 
 function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -231,9 +229,20 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
           }
         } catch {}
 
-        await canvas.loadFromJSON(designJson);
-        canvas.renderAll();
+        // Request images with CORS. Most sources are inlined as data: URLs by
+        // inlineExternalImages, but a root-relative /storage src is left alone
+        // on purpose — and this page has an opaque origin (setContent), so
+        // loading one without crossOrigin taints the canvas and makes the
+        // toDataURL() below throw. /storage sends Access-Control-Allow-Origin.
+        const markCors = (objs: any[]) => {
+          for (const o of objs || []) {
+            if (String(o?.type || "").toLowerCase() === "image") o.crossOrigin = "anonymous";
+            if (o?.objects) markCors(o.objects);
+          }
+        };
+        markCors((designJson as any)?.objects);
 
+        await canvas.loadFromJSON(designJson);
         canvas.renderAll();
         return canvas.toDataURL({ format: "png", multiplier: scale });
       },

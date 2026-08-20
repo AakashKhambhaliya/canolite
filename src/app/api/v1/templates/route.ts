@@ -22,6 +22,8 @@ export async function GET(request: Request) {
         width: templates.width,
         height: templates.height,
         output_defaults: templates.outputDefaults,
+        has_video: templates.hasVideo,
+        video_defaults: templates.videoDefaults,
         created_at: templates.createdAt,
         updated_at: templates.updatedAt,
       })

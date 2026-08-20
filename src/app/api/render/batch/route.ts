@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { createBatchJobs } from "@/lib/render/create-job";
+import { createBatchJobs, createVideoBatchJobs } from "@/lib/render/create-job";
 import { processBatch } from "@/lib/render/process-job";
+import { processVideoBatch } from "@/lib/render/process-video-job";
 
 /**
  * Dashboard batch render. Creates the jobs and processes them in the
@@ -34,6 +35,27 @@ export async function POST(request: Request) {
         { error: "Maximum 500 items per batch" },
         { status: 400 }
       );
+    }
+    if (format === "mp4") {
+      if (items.length > 20) {
+        return NextResponse.json({ error: "Maximum 20 items per video batch" }, { status: 400 });
+      }
+      const created = await createVideoBatchJobs({
+        projectId: user.projectId,
+        templateId: template_id,
+        items,
+        output: { fps: body.fps, durationSec: body.duration, quality: body.videoQuality || body.qualityPreset },
+      });
+      if (!created) return NextResponse.json({ error: "Template not found" }, { status: 404 });
+      void processVideoBatch(created.uids);
+      return NextResponse.json({
+        batch_uid: created.batchUid,
+        uids: created.uids,
+        count: created.uids.length,
+        status: "queued",
+        template_id,
+        format: "mp4",
+      });
     }
 
     const created = await createBatchJobs({

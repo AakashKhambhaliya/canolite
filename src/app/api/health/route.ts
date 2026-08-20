@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import path from "path";
 import fs from "fs";
+import { checkDatabaseHealth } from "@/db";
 
 function getVersion(): string {
   // Prefer the version baked into the image at build time, so /api/health and
@@ -41,10 +42,15 @@ function getBuildTime(): string {
  * backwards compatibility (the Docker HEALTHCHECK keys off this endpoint).
  */
 export async function GET() {
-  return NextResponse.json({
-    status: "ok",
-    version: getVersion(),
-    commit: getCommit(),
-    buildTime: getBuildTime(),
-  });
+  const database = await checkDatabaseHealth();
+  return NextResponse.json(
+    {
+      status: database.ok ? "ok" : "error",
+      version: getVersion(),
+      commit: getCommit(),
+      buildTime: getBuildTime(),
+      database,
+    },
+    { status: database.ok ? 200 : 503 }
+  );
 }

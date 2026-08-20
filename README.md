@@ -62,19 +62,31 @@ Hosting on **Dokploy**, or want manual Docker/VPS steps? See
 ```bash
 git clone https://github.com/AakashKhambhaliya/canolite.git
 cd canolite
-npm install
-npx playwright install chromium   # headless browser for rendering (~150 MB, one time)
-npm run dev                        # or: PORT=3001 npm run dev
+npm run setup
+```
+
+That single command installs dependencies, downloads the matching headless
+Chromium (~150 MB, one time), and starts the server. **No `.env` is needed** —
+the database, storage and asset URLs all have working defaults.
+
+Useful flags:
+
+```bash
+npm run setup -- --port 3001    # serve on a different port
+npm run setup -- --prod         # production build + start instead of dev
+npm run setup -- --no-start     # install and verify only
 ```
 
 Open **http://localhost:3000** — on first launch you'll be guided through a
 one-time **setup wizard** to create your admin account. (Image/asset URLs are
 relative, so it works on any port without setting `APP_URL`.)
 
+Already set up? `npm run dev` starts the server on its own.
+
 That's it. By default Canolite runs **fully self-contained** with no external
 services:
 
-- **Database** → in-process [PGlite](https://pglite.dev) (WASM Postgres), persisted to `./.pglite`
+- **Database** → embedded PostgreSQL by default, persisted to `./data/pgdata` locally or `/app/data/pgdata` in Docker
 - **Storage** → local filesystem under `public/storage` (or `STORAGE_DIR`)
 - **Rendering** → synchronous, in-process (headless Chromium + Sharp)
 
@@ -96,7 +108,7 @@ Persist the single `/app/data` volume (database + images + backups), set
 
 ### Optional: external PostgreSQL
 
-Prefer a real Postgres over the in-process PGlite? Set `DATABASE_URL` to a
+Prefer managed/external Postgres over the embedded default? Set `DATABASE_URL` to a
 `postgres://…` URL and Canolite uses it instead (tables are migrated
 automatically on boot). Rendered images are still stored on local disk. A ready
 compose file is included:
@@ -137,7 +149,7 @@ Next.js App  ──┬── Dashboard pages (editor, templates, keys, playgroun
         ▼
 Render pipeline (synchronous, in-process)
         │
-        ├── Database: PGlite (default) or PostgreSQL
+        ├── Database: embedded PostgreSQL (default) or external PostgreSQL
         └── Storage:  local filesystem (persist with a volume)
 ```
 
@@ -181,6 +193,33 @@ GET /v1/images/:uid
 
 > `image_url` and `webhook_url` must be **public** http(s) URLs — requests to
 > localhost / private IPs are rejected (SSRF protection).
+
+### Generate an MP4 video
+
+Templates containing video layers expose asynchronous MP4 rendering:
+
+```bash
+POST /v1/videos
+{
+  "template_id": "tmpl_abc123",
+  "modifications": [
+    { "name": "headline", "text": "Launch" },
+    { "name": "hero_video", "video_url": "https://example.com/clip.mp4", "trim_start": 0, "trim_end": 8 }
+  ],
+  "fps": 30,
+  "duration": 8,
+  "quality": "balanced",
+  "webhook_url": "https://example.com/webhook"
+}
+```
+
+Returns `202`; poll the job for progress and URLs:
+
+```bash
+GET /v1/videos/:uid
+```
+
+Batch MP4 rendering is available at `POST /v1/videos/batch` and is capped at 20 items.
 
 ### Batch generation
 
@@ -251,7 +290,7 @@ Create a **Canolite API** credential in n8n with:
 | Language | TypeScript 5 |
 | Editor | Fabric.js 6 — snapping, layer reorder, Google Fonts, custom fonts |
 | Rendering | Synchronous & in-process — headless Chromium (Playwright) + Sharp |
-| Database | In-process PGlite by default · PostgreSQL + Drizzle ORM |
+| Database | Embedded PostgreSQL zero-config default · external PostgreSQL for production |
 | Storage | Local filesystem (persist with a volume) |
 | UI | Tailwind CSS 4 + shadcn/ui + Radix UI |
 | Auth | Single-admin, session-based (bcrypt) |
@@ -260,9 +299,7 @@ Create a **Canolite API** credential in n8n with:
 
 ## Deployment
 
-Canolite runs as a **single self-contained container** (PGlite + local storage +
-Chromium). Persist the single `/app/data` volume, set `APP_URL`, expose
-port `3000`, and you're done.
+Canolite starts an embedded PostgreSQL child process when `DATABASE_URL` is unset, so local and single-container installs work with zero database setup. For production, point `DATABASE_URL` at a managed/external PostgreSQL database.
 
 See **[DEPLOY.md](./DEPLOY.md)** for step-by-step guides for **Coolify**,
 **Dokploy**, and a **bare VPS** (with or without Docker).
@@ -271,15 +308,28 @@ See **[DEPLOY.md](./DEPLOY.md)** for step-by-step guides for **Coolify**,
 
 ## Environment Variables
 
-All variables are optional for the default self-contained setup.
+If `DATABASE_URL` is unset, Canolite starts embedded PostgreSQL on `127.0.0.1` using `PGDATA_DIR` and `PGPORT`. For production, set `DATABASE_URL` to a managed/external PostgreSQL connection string.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `APP_URL` | `http://localhost:3000` | Public URL of the app. Image/asset URLs are now relative (resolve to the current origin), so this is only needed for **webhook payloads** to carry an absolute image URL. |
-| `DATABASE_URL` | `pglite://.pglite` | Unset or `pglite://…` → in-process PGlite. A `postgres://…` URL uses Postgres. |
+| `DATABASE_URL` | unset | External PostgreSQL connection string (`postgres://…` or `postgresql://…`). When unset, embedded PostgreSQL starts on `127.0.0.1`. Production should use managed/external PostgreSQL. |
+| `PGDATA_DIR` | `./data/pgdata` | Data directory for embedded PostgreSQL when `DATABASE_URL` is unset. Docker sets `/app/data/pgdata`. |
+| `PGPORT` | `54329` | Local loopback port for embedded PostgreSQL. Uses 54329 rather than 5432 to avoid clashing with system Postgres. |
+| `DB_POOL_MAX` | `10` | Maximum node-postgres pool connections per process. The web app and `npm run worker` are separate processes and each gets its own pool. |
+| `DB_SSL` | auto | For non-local PostgreSQL hosts, SSL is enabled automatically. Set `DB_SSL=disable` only for trusted private networks that do not support SSL. |
 | `ADMIN_EMAIL` | — | Optional: auto-provision admin email on boot (skips the setup wizard) |
 | `ADMIN_PASSWORD` | — | Optional: auto-provision admin password on boot (skips the setup wizard) |
-| `MAX_UPLOAD_MB` | `10` | Max upload file size |
+| `MAX_UPLOAD_MB` | `10` | Max image/font upload file size |
+| `MAX_VIDEO_UPLOAD_MB` | `100` | Max video upload size in MB |
+| `MAX_VIDEO_DURATION_SEC` | `60` | Max uploaded source video duration in seconds |
+| `MAX_VIDEO_PIXELS` | `8294400` | Max uploaded source video resolution as width × height pixels |
+| `FFMPEG_PATH` / `FFPROBE_PATH` | package binary | Optional absolute paths to ffmpeg/ffprobe executables |
+| `VIDEO_RENDER_TIMEOUT_MS` | `900000` | Timeout budget for async MP4 renders |
+| `VIDEO_PROBE_TIMEOUT_MS` / `VIDEO_POSTER_TIMEOUT_MS` | `60000` / `60000` | Timeout budget for upload video probing and poster extraction |
+| `VIDEO_DEFAULT_FPS` / `VIDEO_MAX_FPS` | `30` / `60` | Default and maximum MP4 render frame rate |
+| `VIDEO_MAX_OUTPUT_SEC` | `120` | Maximum MP4 output duration |
+| `VIDEO_CONCURRENCY` | `1` | Maximum in-process video renders at once |
 | `AUTH_SECRET` | — | Reserved for session signing |
 
 ---

@@ -37,11 +37,10 @@ services:
       # - ADMIN_EMAIL=you@example.com
       # - ADMIN_PASSWORD=change-me-please
       #
-      # Do NOT add DATABASE_URL, here or in Coolify's environment panel, unless
-      # you are deliberately pointing at a real Postgres server. The image
-      # defaults to in-process PGlite under /app/data; a blank value overrides
-      # that default and relocates the database into the container, where it is
-      # destroyed on the next redeploy. Blank is worse than absent.
+      # For production, set DATABASE_URL to a Coolify PostgreSQL resource's
+      # internal connection string. If DATABASE_URL is omitted, the image starts
+      # embedded PostgreSQL under /app/data/pgdata. Never set DATABASE_URL to a
+      # blank value — blank is worse than absent.
 
     volumes:
       # The single mount that holds all state: database, rendered images,

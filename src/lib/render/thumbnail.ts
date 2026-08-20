@@ -8,7 +8,7 @@ import { promises as fsPromises } from "fs";
 import path from "path";
 import { db } from "@/db";
 import { templates } from "@/db/schema";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, sql, getTableColumns } from "drizzle-orm";
 import { prepareDesignForRender } from "./prepare-design";
 import { renderToBuffer } from "./render-image";
 import { uploadFile, deleteFile, storageFilePath } from "@/lib/storage";
@@ -102,7 +102,16 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
   const p = (async () => {
     for (let attempt = 1; attempt <= MAX_RENDER_ATTEMPTS; attempt++) {
       const [template] = await db
-        .select()
+        .select({
+          ...getTableColumns(templates),
+          // The row version as Postgres itself stores it. A JS Date cannot
+          // round-trip this column: `updated_at` is `timestamp` (no time zone,
+          // microsecond precision), but a Date only carries milliseconds AND
+          // the driver re-binds it as a UTC "…Z" string, which Postgres then
+          // compares in a different frame of reference. Either error alone
+          // makes an equality guard match zero rows, so keep the exact text.
+          updatedAtRaw: sql<string>`to_char(${templates.updatedAt}, 'YYYY-MM-DD HH24:MI:SS.US')`,
+        })
         .from(templates)
         .where(eq(templates.id, templateRowId))
         .limit(1);
@@ -113,6 +122,7 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
       // Snapshot the version we're rendering. The final UPDATE only applies
       // if the row is still at this version when the render completes.
       const snapshot = template.updatedAt;
+      const snapshotRaw = template.updatedAtRaw;
 
       const { designJson, customFonts } = await prepareDesignForRender(
         template.designJson,
@@ -138,7 +148,12 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
         .where(
           and(
             eq(templates.id, template.id),
-            eq(templates.updatedAt, snapshot)
+            // Compare the stored text, NOT eq(templates.updatedAt, snapshot):
+            // that guard could never match (see updatedAtRaw above), so
+            // thumbnail_url stayed NULL for every template forever and each
+            // boot burned MAX_RENDER_ATTEMPTS Chromium renders per template
+            // before giving up with "design kept changing mid-render".
+            sql`to_char(${templates.updatedAt}, 'YYYY-MM-DD HH24:MI:SS.US') = ${snapshotRaw}`
           )
         )
         .returning({ id: templates.id });

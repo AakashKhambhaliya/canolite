@@ -11,6 +11,10 @@
 #   CANOLITE_DIR=/opt/canolite         # install location (default ~/canolite)
 #   ADMIN_EMAIL=you@example.com        # auto-create admin (skip setup wizard)
 #   ADMIN_PASSWORD=change-me
+#
+# Video support requires ffmpeg/ffprobe. The Docker image installs them for you
+# (roughly +80 MB). Non-Docker/manual installs should install ffmpeg and set
+# FFMPEG_PATH / FFPROBE_PATH if the binaries are not on PATH.
 # ============================================================
 set -euo pipefail
 

@@ -6,6 +6,22 @@ import { getCurrentUser } from "@/lib/auth";
 import { extractFields } from "@/lib/render/apply-modifications";
 import { generateThumbnail } from "@/lib/render/thumbnail";
 import { deleteFile } from "@/lib/storage";
+import { isImage } from "@/lib/design/predicates";
+
+function designHasVideo(value: any): boolean {
+  const objects = Array.isArray(value?.objects) ? value.objects : [];
+  const visit = (obj: any): boolean => {
+    if (!obj || typeof obj !== "object") return false;
+    // Must be case-insensitive (isImage lowercases): a LIVE Fabric object
+    // reports type "image", but the SERIALIZED design stored here reports
+    // "Image". Comparing to "image" directly never matched, so has_video
+    // stayed false for every template — which is what hid MP4 from the export
+    // options and made video renders fail with "does not contain video layers".
+    if (isImage(obj) && obj.mediaType === "video") return true;
+    return Array.isArray(obj.objects) && obj.objects.some(visit);
+  };
+  return objects.some(visit);
+}
 
 export async function GET(
   request: Request,
@@ -65,14 +81,18 @@ export async function PUT(
     }
 
     const body = await request.json();
-    const { name, width, height, designJson, outputDefaults } = body;
+    const { name, width, height, designJson, outputDefaults, videoDefaults } = body;
 
     const updateData: Record<string, any> = { updatedAt: new Date() };
     if (name !== undefined) updateData.name = name;
     if (width !== undefined) updateData.width = width;
     if (height !== undefined) updateData.height = height;
-    if (designJson !== undefined) updateData.designJson = designJson;
+    if (designJson !== undefined) {
+      updateData.designJson = designJson;
+      updateData.hasVideo = designHasVideo(designJson);
+    }
     if (outputDefaults !== undefined) updateData.outputDefaults = outputDefaults;
+    if (videoDefaults !== undefined) updateData.videoDefaults = videoDefaults;
 
     const designChanged =
       designJson !== undefined || width !== undefined || height !== undefined;

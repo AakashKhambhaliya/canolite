@@ -32,6 +32,8 @@ const PRIVATE_V4 = [
   "192.0.0.0/24",
   "192.168.0.0/16",
   "198.18.0.0/15",
+  "224.0.0.0/4",
+  "240.0.0.0/4",
 ];
 
 function isPrivateV4(ip: string): boolean {
@@ -43,6 +45,7 @@ function isPrivateV6(ip: string): boolean {
   if (a === "::1" || a === "::") return true;
   if (a.startsWith("fe80") || a.startsWith("fc") || a.startsWith("fd"))
     return true;
+  if (a.startsWith("ff")) return true; // multicast
   // IPv4-mapped (::ffff:a.b.c.d)
   const mapped = a.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (mapped) return isPrivateV4(mapped[1]);

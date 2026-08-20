@@ -1,9 +1,9 @@
 # ============================================================
 # Canolite — production image
 #
-# Self-contained by default: in-process PGlite database + local filesystem
-# storage + headless-Chromium rendering. Mount a single volume at /app/data to
-# persist all state. Point DATABASE_URL at Postgres to use Postgres instead.
+# Self-contained by default: embedded PostgreSQL + local filesystem storage +
+# headless-Chromium rendering. Mount a single volume at /app/data to persist all
+# state. Point DATABASE_URL at external Postgres to bypass embedded Postgres.
 # ============================================================
 
 FROM node:24-bookworm-slim AS base
@@ -40,15 +40,22 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    DATABASE_URL=pglite:///app/data/pglite \
+    PGDATA_DIR=/app/data/pgdata \
+    PGPORT=54329 \
     STORAGE_DIR=/app/data/storage \
     REQUIRE_PERSISTENT_DATA=1 \
+    FFMPEG_PATH=/usr/bin/ffmpeg \
+    FFPROBE_PATH=/usr/bin/ffprobe \
     GIT_SHA=${GIT_SHA} \
     APP_VERSION=${APP_VERSION}
 
 # Production deps, then download Chromium + its system libraries.
 # scripts/ must land before `npm ci` — the postinstall hook lives there and npm
-# runs it as part of the install.
+# runs it as part of the install. ffmpeg/ffprobe are installed via apt so the
+# image does not depend on npm postinstall binary downloads at runtime.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 COPY scripts ./scripts
 RUN npm ci --omit=dev \
@@ -62,12 +69,17 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/drizzle ./drizzle
 COPY --from=builder /app/next.config.mjs ./next.config.mjs
 
-# Writable data dirs (PGlite DB + rendered images / uploads + backups). Mount a
-# volume at /app/data to persist everything — the app keeps all state under it.
-RUN mkdir -p /app/data/pglite /app/data/storage /app/data/backups
+# Writable data dirs (embedded PostgreSQL + rendered images / uploads + backups).
+# Mount a volume at /app/data to persist everything — the app keeps all state
+# under it. PostgreSQL refuses to run as root, so the runtime user is non-root.
+RUN groupadd -r canolite \
+ && useradd -r -g canolite -d /app -s /usr/sbin/nologin canolite \
+ && mkdir -p /app/data/pgdata /app/data/storage /app/data/backups \
+ && chown -R canolite:canolite /app/data
 
 # Record when this image was built (reported by /api/health as buildTime).
 RUN date -u +"%Y-%m-%dT%H:%M:%SZ" > /app/.build-time
+USER canolite
 
 EXPOSE 3000
 

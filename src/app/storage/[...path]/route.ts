@@ -20,6 +20,9 @@ const MIME: Record<string, string> = {
   jpeg: "image/jpeg",
   gif: "image/gif",
   svg: "image/svg+xml",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
   woff: "font/woff",
   woff2: "font/woff2",
   ttf: "font/ttf",
@@ -52,6 +55,11 @@ export async function GET(
       // Never let the browser MIME-sniff user-supplied bytes into something
       // executable.
       "X-Content-Type-Options": "nosniff",
+      // NOTE: the renderer needs Access-Control-Allow-Origin on these files
+      // (see the /storage entry in next.config.mjs `headers()`). It is set
+      // there, not here: with STORAGE_DIR at its default the files live under
+      // public/ and are served by Next's STATIC handler, which never reaches
+      // this route — and setting it in both places would emit the header twice.
     };
 
     // SVGs served inline from our own origin are a stored-XSS vector: a crafted

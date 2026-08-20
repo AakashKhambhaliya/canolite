@@ -5,6 +5,13 @@
 
 import { applyModifications, extractFields } from "../../src/lib/render/apply-modifications";
 import { generateId, generateToken, formatDate, formatRelativeTime, formatDuration, truncate } from "../../src/lib/utils";
+import { buildTimeline, collectVideoLayers, sourceTimeForFrame } from "../../src/lib/video/timeline";
+import { walkDesignObjects } from "../../src/lib/design/walk";
+import { isImage, isShape, isText } from "../../src/lib/design/predicates";
+import { resolveOutput } from "../../src/lib/render/create-job";
+import { storageFilePath } from "../../src/lib/storage";
+import { isUrlSafe } from "../../src/lib/ssrf";
+import { selfStoragePath } from "../../src/lib/render/inline-images";
 
 let passed = 0;
 let failed = 0;
@@ -539,7 +546,6 @@ import { promises as fsp } from "fs";
 import pathMod from "path";
 import { inlineFontSources } from "../../src/lib/render/inline-fonts";
 import { buildFontHead } from "../../src/lib/render/render-image";
-import { storageFilePath } from "../../src/lib/storage";
 
 async function renderFontTests() {
   // The render page is created with page.setContent(), so it has an opaque
@@ -639,11 +645,175 @@ import {
   );
 }
 
+// =============================================================
+// 10. Video timeline and modifications
+// =============================================================
+console.log("\n10. Video timeline and modifications\n");
+
+{
+  const design = {
+    objects: [
+      {
+        type: "image",
+        id: "vid1",
+        name: "hero_video",
+        dynamic: true,
+        mediaType: "video",
+        src: "/storage/uploads/poster.jpg",
+        videoSrc: "/storage/uploads/clip.mp4",
+        videoDuration: 12,
+        trimStart: 2,
+        trimEnd: 8,
+        startAt: 1,
+        loop: false,
+        muted: false,
+        volume: 0.75,
+        playbackRate: 2,
+        fit: "cover",
+        hasAudio: true,
+        width: 400,
+        height: 300,
+        scaleX: 0.5,
+        scaleY: 2,
+      },
+    ],
+  };
+
+  const layers = collectVideoLayers(design);
+  assertEqual(layers.length, 1, "collectVideoLayers finds Fabric image video layers");
+  assertEqual(layers[0].boxW, 200, "video layer boxW uses width × scaleX");
+  assertEqual(layers[0].boxH, 600, "video layer boxH uses height × scaleY");
+
+  const timeline = buildTimeline(design, { fps: 30 });
+  assertEqual(timeline.durationSec, 5, "timeline minimum duration is 5s when layer ends earlier");
+  assertEqual(timeline.frameCount, 150, "frameCount = ceil(duration × fps)");
+  assertEqual(buildTimeline(design, { fps: 24, durationSec: 10 }).durationSec, 10, "explicit video duration wins");
+
+  assertEqual(sourceTimeForFrame(layers[0], 0, 30), null, "sourceTime null before startAt");
+  assertEqual(sourceTimeForFrame(layers[0], 30, 30), 2, "sourceTime starts at trimStart on startAt frame");
+  assertEqual(sourceTimeForFrame(layers[0], 60, 30), 4, "sourceTime honors playbackRate");
+  assertEqual(sourceTimeForFrame(layers[0], 121, 30), null, "sourceTime null after non-looping layer ends");
+
+  const looping = { ...layers[0], loop: true };
+  assertEqual(sourceTimeForFrame(looping, 150, 30), 4, "sourceTime wraps when loop is true");
+
+  // Regression: Fabric v6 SERIALIZES type as "Image" (capitalised) even though a
+  // live object reports "image". Every fixture above uses the live casing, so a
+  // case-sensitive check passed this whole suite while collecting zero layers
+  // from real saved designs — the "Template contains no video layers" bug.
+  const savedDesign = { objects: [{ ...design.objects[0], type: "Image" }] };
+  assertEqual(
+    collectVideoLayers(savedDesign).length,
+    1,
+    'collectVideoLayers finds video layers in saved designs (type: "Image")'
+  );
+  assertEqual(
+    collectVideoLayers({
+      objects: [{ type: "Rect", mediaType: "video", videoSrc: "/x.mp4" }],
+    }).length,
+    0,
+    "collectVideoLayers ignores non-image objects regardless of casing"
+  );
+
+  const { modifiedJson, warnings } = applyModifications(design, [
+    {
+      name: "hero_video",
+      video_url: "https://cdn.example.com/new.mp4",
+      trim_end: 99,
+      start_at: 3,
+      muted: true,
+      text: "ignored",
+    } as any,
+  ]);
+  assertEqual(modifiedJson.objects[0].videoSrc, "https://cdn.example.com/new.mp4", "video_url swaps videoSrc");
+  assertEqual(modifiedJson.objects[0].src, "/storage/uploads/poster.jpg", "video_url leaves poster src unchanged");
+  assertEqual(modifiedJson.objects[0].trimEnd, 12, "trim_end clamps to known videoDuration");
+  assertEqual(modifiedJson.objects[0].startAt, 3, "start_at maps to startAt");
+  assertEqual(modifiedJson.objects[0].muted, true, "muted override applies");
+  assert(warnings.some((w) => w.includes("text") && w.includes("video allowlist")), "text on video warns and is ignored");
+
+  const fields = extractFields(design);
+  assertEqual(fields[0].type, "video", "extractFields emits video type");
+  assertEqual(fields[0].defaultValue, "/storage/uploads/clip.mp4", "video field default is videoSrc");
+}
+
+
+// =============================================================
+// 11. Shared design helpers and pure safety checks
+// =============================================================
+console.log("\n11. Shared design helpers and pure safety checks\n");
+
+{
+  const nested = {
+    objects: [
+      { type: "textbox", name: "a" },
+      { type: "group", objects: [{ type: "image", name: "b" }, { type: "rect", name: "c" }] },
+    ],
+  };
+  const seen: string[] = [];
+  walkDesignObjects(nested, ({ object, path }) => seen.push(`${path}:${object.name || object.type}`));
+  assertEqual(seen, ["0:a", "1:group", "1.0:b", "1.1:c"], "walkDesignObjects visits nested Fabric objects in order");
+  assert(isText(nested.objects[0]), "isText recognises textbox");
+  assert(isImage((nested.objects[1] as any).objects[0]), "isImage recognises image");
+  assert(isShape((nested.objects[1] as any).objects[1]), "isShape recognises rect");
+
+  const resolved = resolveOutput(
+    { outputDefaults: { format: "jpg", quality: 80, scale: 2 } },
+    { quality: 70 },
+    { defaultFormat: "webp", defaultQuality: 60, defaultScale: 1 }
+  );
+  assertEqual(resolved, { format: "jpg", quality: 70, scale: 2 }, "resolveOutput priority is request → template → global → default");
+
+  let traversalBlocked = false;
+  try {
+    storageFilePath("../secret.txt");
+  } catch {
+    traversalBlocked = true;
+  }
+  assert(traversalBlocked, "storageFilePath blocks path traversal");
+}
+
+async function ssrfTests() {
+  assertEqual(await isUrlSafe("not-a-url"), false, "SSRF guard rejects invalid URLs");
+  assertEqual(await isUrlSafe("file:///etc/passwd"), false, "SSRF guard rejects non-http schemes");
+  assertEqual(await isUrlSafe("http://127.0.0.1:3000"), false, "SSRF guard rejects loopback IPv4");
+  assertEqual(await isUrlSafe("http://[::1]/"), false, "SSRF guard rejects loopback IPv6");
+
+  // Fabric saves an image's src already absolutized by the browser. Those
+  // same-origin /storage URLs must be normalised back to root-relative, or the
+  // renderer treats them as external and the SSRF guard (correctly) blocks the
+  // loopback fetch — which is what broke MP4 export on the video poster.
+  assertEqual(
+    selfStoragePath("http://localhost:3000/storage/uploads/a/b.jpg"),
+    "/storage/uploads/a/b.jpg",
+    "self storage URL on localhost is normalised to a relative path"
+  );
+  assertEqual(
+    selfStoragePath("http://127.0.0.1:9999/storage/x.png"),
+    "/storage/x.png",
+    "self storage URL is normalised on any loopback port"
+  );
+  assertEqual(
+    selfStoragePath("https://evil.example.com/storage/x.png"),
+    null,
+    "an off-origin /storage URL is NOT treated as our own"
+  );
+  assertEqual(
+    selfStoragePath("http://localhost:3000/etc/passwd"),
+    null,
+    "a same-origin non-storage path is not normalised"
+  );
+  assertEqual(
+    selfStoragePath("/storage/already/relative.jpg"),
+    null,
+    "an already-relative src needs no normalisation"
+  );
+}
 
 // =============================================================
 // RESULTS
 // =============================================================
-renderFontTests().then(apiKeyTests).then(() => {
+renderFontTests().then(apiKeyTests).then(ssrfTests).then(() => {
   console.log("\n================================================================");
   console.log(`  RESULTS: ${passed} passed, ${failed} failed`);
   console.log("================================================================");

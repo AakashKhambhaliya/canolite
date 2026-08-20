@@ -1,7 +1,7 @@
 # ============================================================
 # Canolite — self-contained single-container deployment.
 #
-# In-process PGlite database + local filesystem storage. All state (database,
+# Embedded PostgreSQL + local filesystem storage. All state (database,
 # rendered images, uploads, backups) lives under /app/data — persist that ONE
 # volume and you persist everything. Ideal for a VPS, Coolify, or Dokploy.
 #

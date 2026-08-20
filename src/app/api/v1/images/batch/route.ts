@@ -33,6 +33,15 @@ export async function POST(request: Request) {
 
     const { template_id, items, format, quality, scale } = parsed.data;
 
+    if (format === "mp4") {
+      return withCors(
+        NextResponse.json(
+          { error: "MP4 renders are asynchronous video jobs. Use POST /v1/videos/batch." },
+          { status: 400 }
+        )
+      );
+    }
+
     // SSRF guard for per-item webhooks.
     for (const item of items) {
       if (item.webhook_url && !(await isUrlSafe(item.webhook_url))) {

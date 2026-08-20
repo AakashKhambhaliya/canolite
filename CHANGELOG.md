@@ -4,6 +4,70 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.8.0
+
+**Canolite renders video.**
+
+Templates can now contain a video layer, and export as **MP4** alongside PNG,
+JPG and WebP. Drop a video onto the canvas (MP4, WebM or MOV), trim it, set
+where it starts, loop it, mute it — then export the whole design as a real
+H.264 video with the rest of your layers composited on top. The same thing
+works over the API: `format: "mp4"` on a template that has a video layer, plus
+`/v1/videos` for creating and polling video renders.
+
+ffmpeg and ffprobe ship with the app, so there is nothing extra to install.
+Video uploads default to a 100 MB / 60 s ceiling (`MAX_VIDEO_UPLOAD_MB`,
+`MAX_VIDEO_DURATION_SEC`).
+
+**The database is now embedded PostgreSQL.**
+
+PGlite has been replaced with a real PostgreSQL server that Canolite starts and
+supervises itself. It is still zero-config — leave `DATABASE_URL` unset and the
+app manages a cluster in `./data/pgdata` on its own — but it is now the same
+engine you would run in production, rather than a WASM reimplementation.
+
+An existing `.pglite` directory is migrated automatically on first boot; nothing
+to do by hand. Point `DATABASE_URL` at a `postgres://` connection string to use
+an external database instead. Note that `DATABASE_URL=pglite:...` is no longer
+accepted and will stop the app at boot with an explanation.
+
+**One command to run it locally.**
+
+```bash
+npm run setup
+```
+
+Installs dependencies, fetches the matching headless Chromium, and starts the
+server. No `.env` required — the database, storage and asset URLs all have
+working defaults.
+
+### Fixes
+
+- **MP4 export failed on every template that had a video layer.** Fabric
+  serializes an object's type as `"Image"` while a live object reports
+  `"image"`, and the video code compared against the lowercase form. Templates
+  with video were recorded as having none, so MP4 was never offered as an output
+  format and video renders failed with "Template contains no video layers".
+- **Uploading a video larger than ~10 MB failed with "Internal server error".**
+  Request bodies were being truncated at Next's default middleware limit rather
+  than rejected, so multipart parsing failed on a partial payload. The limit now
+  follows `MAX_VIDEO_UPLOAD_MB`, and a genuinely oversized upload gets a clear
+  413 naming the limit instead of a 500.
+- **Video uploads could not be inspected at all.** The bundled ffmpeg/ffprobe
+  binaries resolved to a path inside the build output and failed with `ENOENT`.
+- **Renders containing a stored image produced a tainted-canvas error.** Files
+  under `/storage` are now served with `Access-Control-Allow-Origin` and loaded
+  with CORS, so the renderer can export the canvas. This affected still images
+  as well as video.
+- **Template thumbnails never generated.** The guard protecting against a
+  concurrent edit compared a `timestamp` column to a JavaScript `Date`, which
+  cannot represent it exactly, so the update always matched zero rows — every
+  card fell back to a placeholder and each boot re-rendered every template three
+  times before giving up.
+- The MP4 option is now available in the editor's **Output** settings, not just
+  the export dialog.
+- A stray database directory under `data/` is no longer picked up by `git`.
+
 ## v1.7.0
 
 **Canolite now installs on ARM64 servers.**

@@ -11,7 +11,6 @@ import path from "path";
 
 const STORAGE_ROOT =
   process.env.STORAGE_DIR || path.join(process.cwd(), "public", "storage");
-const BUCKET = process.env.S3_BUCKET || "canolite";
 
 function appUrl(): string {
   return process.env.APP_URL || "http://localhost:3000";
@@ -89,22 +88,6 @@ export async function uploadFile(
   return getFileUrl(key);
 }
 
-export async function getPresignedUploadUrl(
-  key: string,
-  _contentType: string,
-  _expiresIn: number = 3600
-): Promise<string> {
-  // No signing needed for local storage — uploads go through /api/upload.
-  return getFileUrl(key);
-}
-
-export async function getPresignedDownloadUrl(
-  key: string,
-  _expiresIn: number = 3600
-): Promise<string> {
-  return getFileUrl(key);
-}
-
 export async function deleteFile(key: string): Promise<void> {
   try {
     await fs.unlink(pathForKey(key));
@@ -152,4 +135,4 @@ export function absoluteForRequest(
   return `${requestBaseUrl(req)}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
-export { BUCKET, appUrl };
+export { appUrl };

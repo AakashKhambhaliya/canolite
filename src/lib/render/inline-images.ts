@@ -21,9 +21,56 @@
  */
 import sharp from "sharp";
 import { safeFetch } from "@/lib/ssrf";
+import { walkDesignObjects } from "@/lib/design/walk";
+import { isImage } from "@/lib/design/predicates";
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25 MB
 const FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Root-relative path for an absolute URL pointing at THIS app's own /storage,
+ * or null if it points anywhere else.
+ *
+ * Fabric serializes an image's `src` from the underlying DOM element, so the
+ * browser has already absolutized it by the time a design is saved: a poster
+ * added as "/storage/uploads/…jpg" gets stored as
+ * "http://localhost:3000/storage/uploads/…jpg". Those are our own files, but
+ * they arrive here looking external, so they were fetched over HTTP — and the
+ * SSRF guard rightly refuses loopback, failing the render with "Failed to fetch
+ * image". Normalising them back to root-relative lets the render page load them
+ * via its <base>, like every other stored image. (Plain images escape this
+ * because the editor inlines them as data: URLs; video posters are the path
+ * that actually hit it.)
+ */
+export function selfStoragePath(src: unknown): string | null {
+  if (typeof src !== "string" || !/^https?:\/\//i.test(src)) return null;
+
+  let url: URL;
+  try {
+    url = new URL(src);
+  } catch {
+    return null;
+  }
+  if (!url.pathname.startsWith("/storage/")) return null;
+
+  let appOrigin: string | null = null;
+  try {
+    appOrigin = new URL(process.env.APP_URL || "http://localhost:3000").origin;
+  } catch {
+    appOrigin = null;
+  }
+
+  // Loopback on any port counts as ourselves: dev servers move ports, and
+  // APP_URL is often left at its default while the app runs on another one.
+  const isLoopback =
+    url.hostname === "localhost" ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "::1" ||
+    url.hostname === "[::1]";
+
+  if (url.origin !== appOrigin && !isLoopback) return null;
+  return url.pathname;
+}
 
 /** True for absolute http(s) URLs we should fetch & inline (not data: or /storage). */
 function isExternalHttp(src: unknown): src is string {
@@ -136,16 +183,20 @@ async function fetchImage(url: string): Promise<FetchedImage> {
 export async function inlineExternalImages(designJson: any): Promise<any> {
   const json = JSON.parse(JSON.stringify(designJson));
 
+  // Rewrite already-absolutized same-origin storage URLs back to root-relative
+  // FIRST, so they are never mistaken for external URLs below.
+  walkDesignObjects(json, ({ object: obj }) => {
+    if (!isImage(obj)) return;
+    const relative = selfStoragePath(obj.src);
+    if (relative) obj.src = relative;
+  });
+
   const urls = new Set<string>();
-  const collect = (objects: any[]) => {
-    for (const obj of objects || []) {
-      if ((obj?.type || "").toLowerCase() === "image" && isExternalHttp(obj.src)) {
-        urls.add(obj.src);
-      }
-      if (obj?.objects) collect(obj.objects);
+  walkDesignObjects(json, ({ object: obj }) => {
+    if (isImage(obj) && isExternalHttp(obj.src)) {
+      urls.add(obj.src);
     }
-  };
-  collect(json.objects || []);
+  });
 
   if (urls.size === 0) return json;
 
@@ -156,33 +207,30 @@ export async function inlineExternalImages(designJson: any): Promise<any> {
     })
   );
 
-  const apply = (objects: any[]) => {
-    for (const obj of objects || []) {
-      if ((obj?.type || "").toLowerCase() === "image" && resolved.has(obj.src)) {
-        const img = resolved.get(obj.src)!;
+  walkDesignObjects(json, ({ object: obj }) => {
+    const src = obj.src;
+    if (isImage(obj) && src && resolved.has(src)) {
+      const img = resolved.get(src)!;
 
-        // Box the template laid out for the original image (display size).
-        const boxW = (obj.width || 0) * (obj.scaleX ?? 1);
-        const boxH = (obj.height || 0) * (obj.scaleY ?? 1);
+      // Box the template laid out for the original image (display size).
+      const boxW = (obj.width || 0) * (obj.scaleX ?? 1);
+      const boxH = (obj.height || 0) * (obj.scaleY ?? 1);
 
-        obj.src = img.dataUrl;
+      obj.src = img.dataUrl;
 
-        // Stretch the replacement to fill exactly that box, so the API result
-        // matches the template regardless of the new image's aspect ratio.
-        if (img.width && img.height && boxW > 0 && boxH > 0) {
-          obj.width = img.width;
-          obj.height = img.height;
-          obj.scaleX = boxW / img.width;
-          obj.scaleY = boxH / img.height;
-          // Drop any crop carried over from the original image.
-          obj.cropX = 0;
-          obj.cropY = 0;
-        }
+      // Stretch the replacement to fill exactly that box, so the API result
+      // matches the template regardless of the new image's aspect ratio.
+      if (img.width && img.height && boxW > 0 && boxH > 0) {
+        obj.width = img.width;
+        obj.height = img.height;
+        obj.scaleX = boxW / img.width;
+        obj.scaleY = boxH / img.height;
+        // Drop any crop carried over from the original image.
+        obj.cropX = 0;
+        obj.cropY = 0;
       }
-      if (obj?.objects) apply(obj.objects);
     }
-  };
-  apply(json.objects || []);
+  });
 
   return json;
 }

@@ -10,11 +10,20 @@
  * - `image_url` → swap `src` and re-fit to the layer's existing box
  * - Style overrides validated against allowlist
  */
+import { walkDesignObjects } from "@/lib/design/walk";
+import { isImage, isText, objectType } from "@/lib/design/predicates";
 
 export interface Modification {
   name: string;
   text?: string;
   image_url?: string;
+  video_url?: string;
+  trim_start?: number;
+  trim_end?: number;
+  start_at?: number;
+  volume?: number;
+  muted?: boolean;
+  loop?: boolean;
   // Style overrides (text)
   fontFamily?: string;
   fontSize?: number;
@@ -55,6 +64,23 @@ const TEXT_ALLOWLIST = new Set([
 ]);
 
 const IMAGE_ALLOWLIST = new Set(["image_url", "opacity"]);
+const VIDEO_ALLOWLIST = new Set([
+  "video_url",
+  "opacity",
+  "trim_start",
+  "trim_end",
+  "start_at",
+  "volume",
+  "muted",
+  "loop",
+]);
+
+const VIDEO_PROP_MAP: Record<string, string> = {
+  video_url: "videoSrc",
+  trim_start: "trimStart",
+  trim_end: "trimEnd",
+  start_at: "startAt",
+};
 
 const BLOCKED_FIELDS = new Set([
   "left",
@@ -122,21 +148,11 @@ export function applyModifications(
 
   // Build a map of named objects from the design
   const namedObjects = new Map<string, any>();
-
-  function walkObjects(objects: any[]) {
-    if (!objects) return;
-    for (const obj of objects) {
-      if (obj.name) {
-        namedObjects.set(obj.name, obj);
-      }
-      // Recurse into groups
-      if (obj.objects) {
-        walkObjects(obj.objects);
-      }
+  walkDesignObjects(json, ({ object: obj }) => {
+    if (obj.name) {
+      namedObjects.set(obj.name, obj);
     }
-  }
-
-  walkObjects(json.objects || []);
+  });
 
   for (const mod of modifications) {
     if (!mod.name) {
@@ -162,12 +178,10 @@ export function applyModifications(
       }
     }
 
-    const objType = (obj.type || "").toLowerCase();
-    const isTextLayer =
-      objType === "textbox" ||
-      objType === "text" ||
-      objType === "i-text";
-    const isImageLayer = objType === "image";
+    const objType = objectType(obj);
+    const isTextLayer = isText(obj);
+    const isVideoLayer = isImage(obj) && obj.mediaType === "video";
+    const isImageLayer = isImage(obj) && !isVideoLayer;
 
     if (isTextLayer) {
       // Apply text content
@@ -198,6 +212,35 @@ export function applyModifications(
         }
 
         obj[key] = value;
+      }
+    } else if (isVideoLayer) {
+      for (const [key, value] of Object.entries(mod)) {
+        if (key === "name") continue;
+        if (BLOCKED_FIELDS.has(key)) continue;
+
+        if (!VIDEO_ALLOWLIST.has(key)) {
+          warnings.push(
+            `Property "${key}" not in video allowlist for "${mod.name}" — ignored`
+          );
+          continue;
+        }
+
+        const targetKey = VIDEO_PROP_MAP[key] || key;
+        if (targetKey === "videoSrc" && typeof value === "string") {
+          obj.videoSrc = value;
+          continue;
+        }
+        if (targetKey === "trimEnd" && typeof value === "number") {
+          const duration = Number(obj.videoDuration || 0);
+          obj.trimEnd = duration > 0 ? Math.min(value, duration) : value;
+          if (duration > 0 && value > duration) {
+            warnings.push(
+              `trim_end for "${mod.name}" exceeds video duration and was clamped`
+            );
+          }
+          continue;
+        }
+        obj[targetKey] = value;
       }
     } else if (isImageLayer) {
       // Apply image URL swap
@@ -265,36 +308,38 @@ export function extractFields(
     properties: Record<string, any>;
   }> = [];
 
-  function walkObjects(objects: any[]) {
-    if (!objects) return;
-    for (const obj of objects) {
-      if (obj.name && obj.dynamic !== false) {
-        const t = (obj.type || "").toLowerCase();
-        const isText =
-          t === "textbox" ||
-          t === "text" ||
-          t === "i-text";
-        const isImage = t === "image";
+  walkDesignObjects(designJson, ({ object: obj }) => {
+    if (obj.name && obj.dynamic !== false) {
+      const video = isImage(obj) && obj.mediaType === "video";
+      const image = isImage(obj) && !video;
+      const text = isText(obj);
 
-        fields.push({
-          name: obj.name,
-          type: isText ? "text" : isImage ? "image" : "shape",
-          defaultValue: isText ? obj.text || "" : isImage ? obj.src || "" : obj.fill || "#000000",
-          properties: {
-            fontFamily: obj.fontFamily,
-            fontSize: obj.fontSize,
-            fontWeight: obj.fontWeight,
-            fill: obj.fill,
-            textAlign: obj.textAlign,
-          },
-        });
-      }
-      if (obj.objects) {
-        walkObjects(obj.objects);
-      }
+      fields.push({
+        name: obj.name,
+        type: text ? "text" : video ? "video" : image ? "image" : "shape",
+        defaultValue: text
+          ? obj.text || ""
+          : video
+            ? obj.videoSrc || ""
+            : image
+              ? obj.src || ""
+              : obj.fill || "#000000",
+        properties: {
+          fontFamily: obj.fontFamily,
+          fontSize: obj.fontSize,
+          fontWeight: obj.fontWeight,
+          fill: obj.fill,
+          textAlign: obj.textAlign,
+          duration: obj.videoDuration,
+          hasAudio: obj.hasAudio,
+          posterUrl: obj.posterUrl || obj.src,
+          trimStart: obj.trimStart,
+          trimEnd: obj.trimEnd,
+          startAt: obj.startAt,
+        },
+      });
     }
-  }
+  });
 
-  walkObjects(designJson?.objects || []);
   return fields;
 }

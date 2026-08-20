@@ -1,8 +1,8 @@
 # ============================================================
 # Canolite — with an external PostgreSQL database.
 #
-# Use this if you'd rather run a real Postgres than the in-process PGlite
-# (e.g. you already operate Postgres backups). Rendered images are still stored
+# Use this if you'd rather run an explicit Postgres service than the embedded
+# zero-config Postgres child process. Rendered images are still stored
 # on local disk under /app/data, so the data volume is still required.
 #
 #   docker compose -f docker-compose.full.yml up -d --build
@@ -15,6 +15,8 @@ services:
       - "3000:3000"
     environment:
       - DATABASE_URL=postgres://canolite:canolite@postgres:5432/canolite
+      - DB_POOL_MAX=${DB_POOL_MAX:-10}
+      - DB_SSL=disable
       - APP_URL=${APP_URL:-http://localhost:3000}
       # - ADMIN_EMAIL=you@example.com
       # - ADMIN_PASSWORD=change-me-please

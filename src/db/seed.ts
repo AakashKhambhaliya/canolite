@@ -1,6 +1,6 @@
 /**
  * Standalone seed script: `npm run db:seed`.
- * Delegates to ensureDb(), which runs migrations (PGlite) and seeds if empty.
+ * Delegates to ensureDb(), which runs migrations and seeds if empty.
  */
 import { ensureDb } from "./index";
 

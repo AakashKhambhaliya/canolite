@@ -12,6 +12,7 @@ import { eq, and } from "drizzle-orm";
 import { generateId } from "@/lib/utils";
 import { applyModifications, type Modification } from "./apply-modifications";
 import { isUrlSafe } from "@/lib/ssrf";
+import { config } from "@/lib/config";
 
 export interface OutputOptions {
   format?: string;
@@ -78,21 +79,28 @@ export async function findTemplate(projectId: string, templateId: string) {
  * Drop image_url modifications that point at non-public hosts (SSRF guard) and
  * collect warnings for the caller.
  */
-async function sanitizeModifications(
+export async function sanitizeModifications(
   mods: Modification[]
 ): Promise<{ mods: Modification[]; warnings: string[] }> {
   const warnings: string[] = [];
   const out: Modification[] = [];
   for (const m of mods) {
+    let cleaned = { ...m };
     if (m.image_url && !(await isUrlSafe(m.image_url))) {
       warnings.push(
         `Blocked image_url for "${m.name}" — only public http(s) URLs are allowed`
       );
-      const { image_url, ...rest } = m;
-      out.push(rest);
-    } else {
-      out.push(m);
+      const { image_url, ...rest } = cleaned;
+      cleaned = rest;
     }
+    if (m.video_url && !(await isUrlSafe(m.video_url))) {
+      warnings.push(
+        `Blocked video_url for "${m.name}" — only public http(s) URLs are allowed`
+      );
+      const { video_url, ...rest } = cleaned;
+      cleaned = rest;
+    }
+    out.push(cleaned);
   }
   return { mods: out, warnings };
 }
@@ -192,4 +200,105 @@ export async function createBatchJobs(params: {
   await db.insert(renderJobs).values(rows);
 
   return { batchUid, uids, resolved, templateUid: template.templateId };
+}
+
+export interface VideoJobOptions {
+  fps?: number;
+  durationSec?: number;
+  quality?: "high" | "balanced" | "small";
+  scale?: number;
+}
+
+function videoQualityToCrf(quality?: "high" | "balanced" | "small"): number {
+  if (quality === "high") return 18;
+  if (quality === "small") return 28;
+  return 23;
+}
+
+export async function createVideoRenderJob(params: {
+  projectId: string;
+  templateId: string;
+  modifications?: Modification[];
+  output?: VideoJobOptions;
+  webhookUrl?: string | null;
+  batchUid?: string;
+}): Promise<CreatedRender | null> {
+  const template = await findTemplate(params.projectId, params.templateId);
+  if (!template) return null;
+  if (!template.hasVideo) throw new Error("Template does not contain video layers");
+
+  const { mods, warnings: ssrfWarnings } = await sanitizeModifications(params.modifications || []);
+  const { warnings: modWarnings } = applyModifications(template.designJson, mods);
+  const fps = params.output?.fps || (template.videoDefaults as any)?.fps || config.VIDEO_DEFAULT_FPS;
+  const maxFps = config.VIDEO_MAX_FPS;
+  const durationSec = params.output?.durationSec || (template.videoDefaults as any)?.durationSec;
+  const maxDuration = config.VIDEO_MAX_OUTPUT_SEC;
+
+  const [job] = await db
+    .insert(renderJobs)
+    .values({
+      uid: generateId("vid"),
+      batchUid: params.batchUid,
+      templateId: template.id,
+      projectId: params.projectId,
+      status: "queued",
+      modifications: mods,
+      format: "mp4",
+      quality: videoQualityToCrf(params.output?.quality),
+      scale: Math.min(params.output?.scale || 1, 4),
+      outputKind: "video",
+      mimeType: "video/mp4",
+      fps: Math.min(Math.max(1, Math.round(fps)), maxFps),
+      durationSec: durationSec ? Math.min(Math.max(1, Math.ceil(durationSec)), maxDuration) : null,
+      progress: 0,
+      webhookUrl: params.webhookUrl || null,
+    })
+    .returning();
+
+  return {
+    job,
+    warnings: [...ssrfWarnings, ...modWarnings],
+    resolved: { format: "mp4", quality: videoQualityToCrf(params.output?.quality), scale: params.output?.scale || 1 },
+  };
+}
+
+export async function createVideoBatchJobs(params: {
+  projectId: string;
+  templateId: string;
+  items: { modifications?: Modification[]; webhook_url?: string | null }[];
+  output?: VideoJobOptions;
+}): Promise<CreatedBatch | null> {
+  const template = await findTemplate(params.projectId, params.templateId);
+  if (!template) return null;
+  if (!template.hasVideo) throw new Error("Template does not contain video layers");
+  const batchUid = generateId("vbatch");
+  const uids: string[] = [];
+  const rows = [];
+  const fps = params.output?.fps || (template.videoDefaults as any)?.fps || config.VIDEO_DEFAULT_FPS;
+  const maxFps = config.VIDEO_MAX_FPS;
+  const maxDuration = config.VIDEO_MAX_OUTPUT_SEC;
+  for (const item of params.items) {
+    const { mods } = await sanitizeModifications(item.modifications || []);
+    const uid = generateId("vid");
+    uids.push(uid);
+    rows.push({
+      uid,
+      batchUid,
+      templateId: template.id,
+      projectId: params.projectId,
+      status: "queued" as const,
+      modifications: mods,
+      format: "mp4",
+      quality: videoQualityToCrf(params.output?.quality),
+      scale: Math.min(params.output?.scale || 1, 4),
+      outputKind: "video",
+      mimeType: "video/mp4",
+      fps: Math.min(Math.max(1, Math.round(fps)), maxFps),
+      durationSec: params.output?.durationSec ? Math.min(Math.max(1, Math.ceil(params.output.durationSec)), maxDuration) : null,
+      progress: 0,
+      webhookUrl: item.webhook_url || null,
+    });
+  }
+  await db.insert(renderJobs).values(rows);
+  return { batchUid, uids, resolved: { format: "mp4", quality: videoQualityToCrf(params.output?.quality), scale: params.output?.scale || 1 }, templateUid: template.templateId };
 }

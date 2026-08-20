@@ -10,6 +10,8 @@ coverage
 dist
 out
 # Local self-contained data — never copy into the image
+data/pgdata
+data/pg-credentials.json
 .pglite
 .pglite.*
 public/storage

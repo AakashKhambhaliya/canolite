@@ -92,10 +92,16 @@ export const templates = pgTable(
     height: integer("height").notNull().default(1350),
     designJson: jsonb("design_json"),
     outputDefaults: jsonb("output_defaults").$type<{
-      format?: "png" | "jpg" | "webp";
+      format?: "png" | "jpg" | "webp" | "mp4";
       quality?: number;
       scale?: number;
       background?: string;
+    }>(),
+    hasVideo: boolean("has_video").default(false),
+    videoDefaults: jsonb("video_defaults").$type<{
+      fps?: number;
+      durationSec?: number;
+      crf?: number;
     }>(),
     thumbnailUrl: text("thumbnail_url"),
     tags: text("tags").array(),
@@ -178,6 +184,14 @@ export const renderJobs = pgTable(
     scale: integer("scale").default(1),
     background: varchar("background", { length: 20 }),
     imageUrl: text("image_url"),
+    outputKind: varchar("output_kind", { length: 10 }).default("image"),
+    outputUrl: text("output_url"),
+    posterUrl: text("poster_url"),
+    mimeType: varchar("mime_type", { length: 50 }),
+    durationSec: integer("duration_sec"),
+    fps: integer("fps"),
+    frameCount: integer("frame_count"),
+    progress: integer("progress").default(0),
     errorMessage: text("error_message"),
     durationMs: integer("duration_ms"),
     webhookUrl: text("webhook_url"),
@@ -207,6 +221,7 @@ export const assets = pgTable(
     type: varchar("type", { length: 50 }).notNull(), // image, font, svg
     mimeType: varchar("mime_type", { length: 100 }),
     size: integer("size"),
+    metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   },
   (table) => ({

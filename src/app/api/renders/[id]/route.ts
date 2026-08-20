@@ -37,13 +37,14 @@ export async function DELETE(
       );
     }
 
-    // Remove the stored image file (best-effort). imageUrl is
-    // `${APP_URL}/storage/<key>` for locally-rendered images.
-    if (job.imageUrl) {
-      const marker = "/storage/";
-      const idx = job.imageUrl.indexOf(marker);
-      if (idx !== -1) {
-        await deleteFile(job.imageUrl.slice(idx + marker.length));
+    // Remove stored output files (best-effort).
+    for (const url of [job.imageUrl, job.outputUrl, job.posterUrl]) {
+      if (url) {
+        const marker = "/storage/";
+        const idx = url.indexOf(marker);
+        if (idx !== -1) {
+          await deleteFile(url.slice(idx + marker.length));
+        }
       }
     }
 

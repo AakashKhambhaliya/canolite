@@ -4,6 +4,7 @@ import { renderJobs } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { processRenderJob } from "@/lib/render/process-job";
+import { processVideoJob } from "@/lib/render/process-video-job";
 
 export async function POST(
   request: Request,
@@ -25,6 +26,9 @@ export async function POST(
         completedAt: null,
         durationMs: null,
         imageUrl: null,
+        outputUrl: null,
+        posterUrl: null,
+        progress: 0,
       })
       .where(
         and(
@@ -42,7 +46,8 @@ export async function POST(
     }
 
     // Re-process the render in the background.
-    void processRenderJob(job.uid);
+    if (job.outputKind === "video") void processVideoJob(job.uid);
+    else void processRenderJob(job.uid);
 
     return NextResponse.json({ success: true, uid: job.uid });
   } catch (error) {

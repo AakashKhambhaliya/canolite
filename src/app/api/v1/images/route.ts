@@ -45,6 +45,15 @@ export async function POST(request: Request) {
       synchronous,
     } = parsed.data;
 
+    if (format === "mp4") {
+      return withCors(
+        NextResponse.json(
+          { error: "MP4 renders are asynchronous video jobs. Use POST /v1/videos." },
+          { status: 400 }
+        )
+      );
+    }
+
     // SSRF guard: reject per-request webhooks that target non-public hosts.
     if (webhook_url && !(await isUrlSafe(webhook_url))) {
       return withCors(

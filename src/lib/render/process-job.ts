@@ -73,7 +73,16 @@ export async function processRenderJob(
 
     await db
       .update(renderJobs)
-      .set({ status: "done", imageUrl, durationMs, completedAt: new Date() })
+      .set({
+        status: "done",
+        imageUrl,
+        outputKind: "image",
+        outputUrl: imageUrl,
+        mimeType: `image/${ext}`,
+        progress: 100,
+        durationMs,
+        completedAt: new Date(),
+      })
       .where(eq(renderJobs.uid, uid));
 
     if (job.webhookUrl) {

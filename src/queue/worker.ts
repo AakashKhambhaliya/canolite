@@ -10,9 +10,11 @@
 
 import { Worker, Queue } from "bullmq";
 import { processRenderJob } from "../lib/render/process-job";
+import { processVideoJob } from "../lib/render/process-video-job";
+import { config } from "../lib/config";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const CONCURRENCY = parseInt(process.env.RENDER_CONCURRENCY || "3", 10);
+const CONCURRENCY = config.RENDER_CONCURRENCY;
 
 // Parse Redis URL for BullMQ connection options
 function parseRedisUrl(url: string) {
@@ -29,6 +31,7 @@ const redisOpts = parseRedisUrl(REDIS_URL);
 
 // Queue
 export const renderQueue = new Queue("render", { connection: redisOpts });
+export const videoQueue = new Queue("render-video", { connection: redisOpts });
 
 // Worker
 const worker = new Worker(
@@ -49,6 +52,16 @@ const worker = new Worker(
   }
 );
 
+const videoWorker = new Worker(
+  "render-video",
+  async (job) => {
+    const { uid } = job.data;
+    console.log(`[Worker] Processing video job: ${uid}`);
+    await processVideoJob(uid, { rethrow: true });
+  },
+  { connection: redisOpts, concurrency: 1 }
+);
+
 worker.on("ready", () => {
   console.log(`[Worker] Ready — concurrency: ${CONCURRENCY}`);
 });
@@ -65,10 +78,18 @@ worker.on("error", (err) => {
   console.error("[Worker] Error:", err);
 });
 
+videoWorker.on("ready", () => {
+  console.log("[Worker] Video worker ready — concurrency: 1");
+});
+videoWorker.on("completed", (job) => console.log(`[Worker] Video job completed: ${job.id}`));
+videoWorker.on("failed", (job, err) => console.error(`[Worker] Video job failed: ${job?.id}`, err.message));
+videoWorker.on("error", (err) => console.error("[Worker] Video error:", err));
+
 // Graceful shutdown
 async function shutdown() {
   console.log("[Worker] Shutting down...");
   await worker.close();
+  await videoWorker.close();
   process.exit(0);
 }
 

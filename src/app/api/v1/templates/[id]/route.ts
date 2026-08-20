@@ -68,6 +68,8 @@ export async function GET(
         width: template.width,
         height: template.height,
         output_defaults: template.outputDefaults,
+        has_video: template.hasVideo,
+        video_defaults: template.videoDefaults,
         fields,
         created_at: template.createdAt,
         updated_at: template.updatedAt,

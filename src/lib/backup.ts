@@ -6,8 +6,6 @@
  * rolled back). Backups never block or crash boot: every failure is logged and
  * swallowed by the caller.
  *
- * - PGlite: uses the PGlite `dumpDataDir("gzip")` API — a restorable tarball of
- *   the database's data directory.
  * - PostgreSQL: shells out to `pg_dump` (custom format); if it isn't installed
  *   the backup is skipped with a clear warning.
  */
@@ -146,34 +144,21 @@ async function pruneBackups(): Promise<void> {
  */
 export async function createBackup(reason: string): Promise<string> {
   // Lazy import to avoid a load-time cycle with src/db (which calls us).
-  const { db, usePglite } = await import("../db");
+  const { getDatabaseUrl } = await import("../db");
 
   const version = getAppVersion();
   const dir = path.join(BACKUP_ROOT, `${reason}-${version}-${backupStamp()}`);
   await fs.promises.mkdir(dir, { recursive: true });
 
-  if (usePglite) {
-    const client = (db as any)?.$client;
-    if (!client || typeof client.dumpDataDir !== "function") {
-      throw new Error("PGlite client does not expose dumpDataDir()");
-    }
-    const blob: Blob = await client.dumpDataDir("gzip");
-    const buf = Buffer.from(await blob.arrayBuffer());
-    await fs.promises.writeFile(path.join(dir, "database.tar.gz"), buf);
-  } else {
-    const databaseUrl = process.env.DATABASE_URL;
-    if (!databaseUrl) {
-      throw new Error("No DATABASE_URL set for a PostgreSQL backup");
-    }
-    const ok = await pgDumpIfAvailable(databaseUrl, path.join(dir, "database.dump"));
-    if (!ok) {
-      console.warn(
-        "[backup] pg_dump is not available — skipping the database backup. " +
-          "Install postgresql-client in the image to enable Postgres backups."
-      );
-      await fs.promises.rmdir(dir).catch(() => {});
-      return "";
-    }
+  const databaseUrl = await getDatabaseUrl();
+  const ok = await pgDumpIfAvailable(databaseUrl, path.join(dir, "database.dump"));
+  if (!ok) {
+    console.warn(
+      "[backup] pg_dump is not available — skipping the database backup. " +
+        "Install postgresql-client in the image to enable Postgres backups."
+    );
+    await fs.promises.rmdir(dir).catch(() => {});
+    return "";
   }
 
   await fs.promises.writeFile(
@@ -183,7 +168,7 @@ export async function createBackup(reason: string): Promise<string> {
         reason,
         version,
         createdAt: new Date().toISOString(),
-        mode: usePglite ? "pglite" : "postgres",
+        mode: "postgres",
       },
       null,
       2

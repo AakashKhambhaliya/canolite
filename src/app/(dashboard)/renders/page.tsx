@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -42,6 +43,7 @@ import {
   Trash2,
   Download,
   Package,
+  Video,
 } from "lucide-react";
 import { cn, formatRelativeTime, formatDuration, copyToClipboard } from "@/lib/utils";
 import { Suspense } from "react";
@@ -276,7 +278,13 @@ function RendersContent() {
                 <CardContent className="flex items-center gap-4 py-4">
                   {/* Preview */}
                   <div className="w-14 h-14 rounded-lg bg-muted overflow-hidden flex items-center justify-center shrink-0">
-                    {render.imageUrl ? (
+                    {render.outputKind === "video" ? (
+                      render.posterUrl ? (
+                        <img src={render.posterUrl} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <Video className="h-6 w-6 text-muted-foreground" />
+                      )
+                    ) : render.imageUrl ? (
                       <img
                         src={render.imageUrl}
                         alt=""
@@ -301,8 +309,9 @@ function RendersContent() {
                     </div>
                     <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
                       <span>{render.format?.toUpperCase() || "PNG"}</span>
+                      {render.outputKind === "video" && <Badge variant="outline" className="text-[10px]">Video</Badge>}
                       <span>·</span>
-                      <span>Quality {render.quality || 90}</span>
+                      <span>{render.outputKind === "video" ? `${render.fps || 30} fps` : `Quality ${render.quality || 90}`}</span>
                       <span>·</span>
                       <span>Scale {render.scale || 1}x</span>
                       {render.durationMs && (
@@ -315,6 +324,15 @@ function RendersContent() {
                       <span>{formatRelativeTime(render.createdAt)}</span>
                     </div>
                   </div>
+
+                  {render.status === "processing" && render.outputKind === "video" && (
+                    <div className="w-28 shrink-0">
+                      <div className="h-1.5 rounded bg-muted overflow-hidden">
+                        <div className="h-full bg-blue-600" style={{ width: `${render.progress || 0}%` }} />
+                      </div>
+                      <div className="text-[10px] text-muted-foreground mt-1 text-right">{render.progress || 0}%</div>
+                    </div>
+                  )}
 
                   {/* Status */}
                   <Badge variant={status.variant} className="shrink-0 gap-1">
@@ -393,11 +411,20 @@ function RendersContent() {
               {/* Preview */}
               {selectedRender.imageUrl && (
                 <div className="rounded-lg overflow-hidden bg-muted">
-                  <img
-                    src={selectedRender.imageUrl}
-                    alt=""
-                    className="w-full object-contain max-h-80"
-                  />
+                  {selectedRender.outputKind === "video" ? (
+                    <video
+                      src={selectedRender.imageUrl}
+                      poster={selectedRender.posterUrl || undefined}
+                      controls
+                      className="w-full object-contain max-h-80"
+                    />
+                  ) : (
+                    <img
+                      src={selectedRender.imageUrl}
+                      alt=""
+                      className="w-full object-contain max-h-80"
+                    />
+                  )}
                 </div>
               )}
 

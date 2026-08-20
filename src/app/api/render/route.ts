@@ -3,8 +3,9 @@ import { db } from "@/db";
 import { renderJobs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
-import { createRenderJob } from "@/lib/render/create-job";
+import { createRenderJob, createVideoRenderJob } from "@/lib/render/create-job";
 import { processRenderJob } from "@/lib/render/process-job";
+import { processVideoJob } from "@/lib/render/process-video-job";
 
 /**
  * Dashboard render (Playground): creates a job and renders it synchronously so
@@ -24,6 +25,26 @@ export async function POST(request: Request) {
         { error: "template_id is required" },
         { status: 400 }
       );
+    }
+
+    if (format === "mp4") {
+      const created = await createVideoRenderJob({
+        projectId: user.projectId,
+        templateId: template_id,
+        modifications,
+        output: { fps: body.fps, durationSec: body.duration, quality: body.videoQuality || body.qualityPreset },
+      });
+      if (!created) return NextResponse.json({ error: "Template not found" }, { status: 404 });
+      void processVideoJob(created.job.uid);
+      return NextResponse.json({
+        uid: created.job.uid,
+        status: "queued",
+        template_id,
+        format: "mp4",
+        progress: 0,
+        warnings: created.warnings,
+        created_at: created.job.createdAt,
+      }, { status: 202 });
     }
 
     const created = await createRenderJob({

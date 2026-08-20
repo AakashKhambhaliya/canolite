@@ -8,19 +8,15 @@ import { cn, copyToClipboard } from "@/lib/utils";
 import { Logo } from "@/components/logo";
 import { installSnapping } from "@/lib/editor/snapping";
 import { ensureFont, registerCustomFont } from "@/lib/editor/font-loader";
+import { EXTRA_PROPS } from "@/lib/editor/serialized-props";
 import { FontPicker, type CustomFont } from "@/components/editor/font-picker";
+import { ExportDialog } from "@/components/editor/export-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   Popover,
   PopoverContent,
@@ -55,6 +51,7 @@ import {
   ChevronLeft,
   Type,
   Image as ImageIcon,
+  Video,
   Square,
   Upload,
   Eye,
@@ -84,6 +81,8 @@ import {
 
 // We'll store the fabric module reference once loaded
 let fabricModule: typeof import("fabric") | null = null;
+
+const HISTORY_PROPS = [...EXTRA_PROPS];
 
 async function loadFabric() {
   if (fabricModule) return fabricModule;
@@ -170,13 +169,12 @@ export default function EditorPage() {
 
   // Force re-render helper
   const [, forceUpdate] = useState(0);
-  const rerender = () => forceUpdate((n) => n + 1);
+  const rerender = useCallback(() => forceUpdate((n) => n + 1), []);
 
   // ---- Undo / redo history -------------------------------------------------
   // Fabric v6 has no built-in history, so we keep a bounded stack of canvas
   // JSON snapshots. Pushed on every add/modify/remove; restored on undo/redo.
   const HISTORY_LIMIT = 80;
-  const HISTORY_PROPS = ["name", "dynamic", "id", "selectable", "evented"];
   const MIN_ZOOM_PCT = 10; // 10% of fit
   const MAX_ZOOM_PCT = 800; // 8x fit
   const historyRef = useRef<{
@@ -255,6 +253,8 @@ export default function EditorPage() {
           visible: obj.visible !== false,
           locked: obj.selectable === false,
           dynamic: obj.dynamic !== false && !!obj.name,
+          mediaType: obj.mediaType,
+          videoDuration: obj.videoDuration,
           object: obj,
         };
       })
@@ -282,7 +282,7 @@ export default function EditorPage() {
       updateLayers();
       rerender();
     },
-    [layers, updateLayers]
+    [layers, updateLayers, rerender]
   );
 
   // Serialize the current canvas and push it onto the history stack. No-ops
@@ -335,7 +335,7 @@ export default function EditorPage() {
       updateLayers();
       rerender();
     },
-    [updateLayers]
+    [updateLayers, rerender]
   );
 
   const undo = useCallback(() => {
@@ -373,7 +373,7 @@ export default function EditorPage() {
     canvas.renderAll();
     setSelectedObject(cloned);
     rerender();
-  }, []);
+  }, [rerender]);
 
   // Move the selected object by a keyboard nudge (1px, or 10px with Shift).
   const nudgeSelected = useCallback((dx: number, dy: number) => {
@@ -592,7 +592,7 @@ export default function EditorPage() {
       }
       setCanvasReady(false);
     };
-  }, [template?.id, updateLayers]);
+  }, [template?.id, template, updateLayers, rerender]);
 
   // Apply zoom via Fabric's native viewport (NOT a CSS transform). CSS-scaling
   // the canvas wrapper breaks in-canvas text editing (mis-positioned textarea /
@@ -752,7 +752,7 @@ export default function EditorPage() {
   }, [canvasReady, template?.id]);
 
   // Save handler
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
     setSaving(true);
@@ -769,13 +769,14 @@ export default function EditorPage() {
       }
     }
 
-    const json = canvas.toObject([
-      "name",
-      "dynamic",
-      "id",
-      "selectable",
-      "evented",
-    ]);
+    for (const o of canvas.getObjects() as any[]) {
+      if (o.mediaType === "video" && /^blob:|^data:video/.test(o.getSrc?.() || "")) {
+        const poster = o.posterUrl || o.src;
+        if (poster && typeof o.setSrc === "function") await o.setSrc(poster);
+      }
+    }
+
+    const json = canvas.toObject([...EXTRA_PROPS]);
 
     saveMutation.mutate({
       name: templateName,
@@ -989,6 +990,64 @@ export default function EditorPage() {
     setActiveTool("select");
   }, [template]);
 
+  const addVideo = useCallback(() => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "video/mp4,video/webm,video/quicktime";
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      const canvas = fabricCanvasRef.current;
+      if (!file || !canvas) return;
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const res = await fetch("/api/upload", { method: "POST", body: formData });
+        const asset = await res.json();
+        if (!res.ok) throw new Error(asset?.error || "Video upload failed");
+        if (!asset.posterUrl) throw new Error("Video upload did not return a poster frame");
+
+        const { FabricImage } = await loadFabric();
+        const img = await FabricImage.fromURL(asset.posterUrl);
+        const maxW = (template?.width || 1080) * 0.5;
+        const maxH = (template?.height || 1350) * 0.5;
+        const scale = Math.min(maxW / (img.width || 1), maxH / (img.height || 1), 1);
+        img.set({
+          left: 50,
+          top: 50,
+          scaleX: scale,
+          scaleY: scale,
+          name: "",
+          dynamic: false,
+          mediaType: "video",
+          src: asset.posterUrl,
+          posterUrl: asset.posterUrl,
+          assetId: asset.id,
+          videoSrc: asset.url,
+          videoDuration: asset.duration || 0,
+          trimStart: 0,
+          trimEnd: asset.duration || 0,
+          startAt: 0,
+          loop: true,
+          muted: false,
+          volume: 1,
+          playbackRate: 1,
+          fit: "cover",
+          hasAudio: asset.hasAudio ?? false,
+        });
+        canvas.add(img);
+        canvas.setActiveObject(img);
+        canvas.renderAll();
+        updateLayers();
+        setActiveTool("select");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to add video");
+      }
+    };
+    input.click();
+    setActiveTool("select");
+  }, [template, updateLayers]);
+
   const replaceImage = useCallback(() => {
     const canvas = fabricCanvasRef.current;
     const activeObj = canvas?.getActiveObject();
@@ -1046,10 +1105,55 @@ export default function EditorPage() {
   const [exportFormat, setExportFormat] = useState<string>("png");
   const [exportQuality, setExportQuality] = useState(100);
   const [exportScale, setExportScale] = useState(2);
+  const [exportFps, setExportFps] = useState(30);
+  const [exportDuration, setExportDuration] = useState<number | "">("");
+  const [exportVideoQuality, setExportVideoQuality] = useState<"high" | "balanced" | "small">("balanced");
 
-  const doExport = useCallback(() => {
+  const doExport = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
+
+    if (exportFormat === "mp4") {
+      try {
+        const json = canvas.toObject([...EXTRA_PROPS]);
+        const saveRes = await fetch(`/api/templates/${template?.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: templateName,
+            designJson: json,
+            width: template?.width,
+            height: template?.height,
+            outputDefaults: {
+              format: outputFormat || undefined,
+              quality: outputQuality !== "" ? Number(outputQuality) : undefined,
+              scale: outputScale !== "" ? Number(outputScale) : undefined,
+            },
+          }),
+        });
+        if (!saveRes.ok) throw new Error("Failed to save template before MP4 export");
+        const res = await fetch("/api/render", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            template_id: template?.templateId,
+            format: "mp4",
+            fps: exportFps,
+            duration: exportDuration === "" ? undefined : Number(exportDuration),
+            videoQuality: exportVideoQuality,
+            scale: exportScale,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || "Failed to start MP4 export");
+        setExportOpen(false);
+        toast.success("MP4 export queued. Opening renders page…");
+        router.push("/renders");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to export MP4");
+      }
+      return;
+    }
 
     // The editor zooms via Fabric's viewport, so temporarily reset to 1:1 at
     // full template dimensions before exporting, then restore the editor zoom.
@@ -1094,7 +1198,7 @@ export default function EditorPage() {
     }
     setExportOpen(false);
     toast.success(`Exported as ${exportFormat.toUpperCase()}`);
-  }, [templateName, exportFormat, exportQuality, exportScale, zoom, fitPct, template?.width, template?.height]);
+  }, [templateName, exportFormat, exportQuality, exportScale, exportFps, exportDuration, exportVideoQuality, zoom, fitPct, template, outputFormat, outputQuality, outputScale, router]);
 
   // Update selected object property
   const updateProp = useCallback(
@@ -1108,7 +1212,7 @@ export default function EditorPage() {
       updateLayers();
       rerender();
     },
-    [updateLayers]
+    [updateLayers, rerender]
   );
 
   // Apply a font family to the selected text object and re-measure it.
@@ -1123,7 +1227,7 @@ export default function EditorPage() {
       updateLayers();
       rerender();
     },
-    [updateLayers]
+    [updateLayers, rerender]
   );
 
   // Get current property from the active object on the canvas (not stale state)
@@ -1227,6 +1331,7 @@ export default function EditorPage() {
     },
     { id: "text", icon: Type, label: "Text", action: addText },
     { id: "image", icon: ImageIcon, label: "Image", action: addImage },
+    { id: "video", icon: Video, label: "Video", action: addVideo },
     { id: "rect", icon: Square, label: "Rect", action: addRect },
     { id: "circle", icon: Circle, label: "Circle", action: addCircle },
     {
@@ -1242,7 +1347,8 @@ export default function EditorPage() {
   const objType = (activeObj?.type || "").toLowerCase();
   const isText =
     objType === "textbox" || objType === "text" || objType === "i-text";
-  const isImage = objType === "image";
+  const isVideo = objType === "image" && (activeObj as any)?.mediaType === "video";
+  const isImage = objType === "image" && !isVideo;
   const isShape =
     objType === "rect" ||
     objType === "circle" ||
@@ -1251,6 +1357,9 @@ export default function EditorPage() {
     objType === "polygon" ||
     objType === "line";
   const isMultiSelect = objType === "activeselection";
+  const canvasHasVideo = !!fabricCanvasRef.current
+    ?.getObjects()
+    .some((o: any) => o.type === "image" && o.mediaType === "video");
 
   const alignButtons: Array<{
     mode: "left" | "centerH" | "right" | "top" | "middle" | "bottom";
@@ -1519,6 +1628,12 @@ export default function EditorPage() {
                       <SelectItem value="png">PNG</SelectItem>
                       <SelectItem value="jpg">JPG</SelectItem>
                       <SelectItem value="webp">WebP</SelectItem>
+                      {/* outputDefaults.format has always accepted "mp4" (see
+                          the templates schema and resolveOutput), but it was
+                          missing here, so a video template could never default
+                          to MP4. Only offered when the canvas actually has a
+                          video layer — an MP4 render without one is rejected. */}
+                      {canvasHasVideo && <SelectItem value="mp4">MP4</SelectItem>}
                     </SelectContent>
                   </Select>
                 </div>
@@ -2027,6 +2142,89 @@ export default function EditorPage() {
                         </>
                       )}
 
+                      {/* Video properties */}
+                      {isVideo && (
+                        <>
+                          <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] p-2 text-[11px] text-[#c4c9d2]">
+                            <div className="flex items-center justify-between gap-2">
+                              <span>Video layer</span>
+                              <span className="font-mono text-[#8b919c]">
+                                {Number(getProp("videoDuration", 0) || 0).toFixed(1)}s
+                              </span>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1.5">
+                              <Label className="text-[11px] text-[#c4c9d2]">Trim start</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                step={0.1}
+                                value={getProp("trimStart", 0)}
+                                onChange={(e) => updateProp("trimStart", Math.max(0, Number(e.target.value) || 0))}
+                                className="h-8 bg-[#121418] border-white/[0.08] text-xs"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-[11px] text-[#c4c9d2]">Trim end</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                step={0.1}
+                                value={getProp("trimEnd", getProp("videoDuration", 0))}
+                                onChange={(e) => updateProp("trimEnd", Math.max(0, Number(e.target.value) || 0))}
+                                className="h-8 bg-[#121418] border-white/[0.08] text-xs"
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1.5">
+                              <Label className="text-[11px] text-[#c4c9d2]">Start at</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                step={0.1}
+                                value={getProp("startAt", 0)}
+                                onChange={(e) => updateProp("startAt", Math.max(0, Number(e.target.value) || 0))}
+                                className="h-8 bg-[#121418] border-white/[0.08] text-xs"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label className="text-[11px] text-[#c4c9d2]">Fit</Label>
+                              <Select value={getProp("fit", "cover")} onValueChange={(v) => updateProp("fit", v)}>
+                                <SelectTrigger className="h-8 bg-[#121418] border-white/[0.08] text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="cover">Cover</SelectItem>
+                                  <SelectItem value="contain">Contain</SelectItem>
+                                  <SelectItem value="stretch">Stretch</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <Label className="text-[11px] text-[#c4c9d2]">Loop</Label>
+                            <Switch checked={!!getProp("loop", true)} onCheckedChange={(v) => updateProp("loop", v)} />
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <Label className="text-[11px] text-[#c4c9d2]">Muted</Label>
+                            <Switch checked={!!getProp("muted", false)} disabled={!getProp("hasAudio", false)} onCheckedChange={(v) => updateProp("muted", v)} />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-[11px] text-[#c4c9d2]">Volume</Label>
+                            <Slider
+                              value={[Math.round((getProp("volume", 1) || 0) * 100)]}
+                              onValueChange={([v]) => updateProp("volume", v / 100)}
+                              min={0}
+                              max={200}
+                              step={1}
+                              disabled={!getProp("hasAudio", false) || !!getProp("muted", false)}
+                            />
+                          </div>
+                        </>
+                      )}
+
                       {/* Image properties */}
                       {isImage && (
                         <>
@@ -2169,6 +2367,8 @@ export default function EditorPage() {
                         layer.type === "text" ||
                         layer.type === "i-text" ? (
                           <Type className="h-3.5 w-3.5 text-[#8b919c] shrink-0" />
+                        ) : layer.type === "image" && layer.mediaType === "video" ? (
+                          <Video className="h-3.5 w-3.5 text-[#8b919c] shrink-0" />
                         ) : layer.type === "image" ? (
                           <ImageIcon className="h-3.5 w-3.5 text-[#8b919c] shrink-0" />
                         ) : (
@@ -2186,6 +2386,11 @@ export default function EditorPage() {
                           {layer.name ||
                             `${layer.type} ${layers.length - idx}`}
                         </span>
+                        {layer.mediaType === "video" && (
+                          <span className="text-[10px] text-[#8b919c] font-mono shrink-0">
+                            {Number(layer.videoDuration || 0).toFixed(1)}s
+                          </span>
+                        )}
 
                         <button
                           type="button"
@@ -2364,114 +2569,26 @@ export default function EditorPage() {
     </TooltipProvider>
 
       {/* ==================== EXPORT DIALOG ==================== */}
-      <Dialog open={exportOpen} onOpenChange={setExportOpen}>
-        <DialogContent
-          className="sm:max-w-[400px] border-white/10"
-          style={{
-            backgroundColor: "#14171c",
-            color: "#e6e8ec",
-            "--border": "220 15% 20%",
-            "--background": "220 18% 10%",
-            "--foreground": "220 10% 92%",
-            "--accent": "220 15% 16%",
-            "--accent-foreground": "220 10% 92%",
-            "--popover": "220 18% 10%",
-            "--popover-foreground": "220 10% 92%",
-            "--muted": "220 15% 16%",
-            "--muted-foreground": "220 10% 65%",
-            "--input": "220 15% 20%",
-          } as React.CSSProperties}
-        >
-          <DialogHeader>
-            <DialogTitle style={{ color: "#e6e8ec" }}>Export Image</DialogTitle>
-          </DialogHeader>
-
-          <div className="space-y-5 pt-2">
-            {/* Format */}
-            <div className="space-y-1.5">
-              <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                Format
-              </Label>
-              <div className="grid grid-cols-4 gap-2">
-                {(["png", "jpeg", "webp", "svg"] as const).map((fmt) => (
-                  <button
-                    key={fmt}
-                    onClick={() => setExportFormat(fmt)}
-                    className={cn(
-                      "h-9 rounded-lg text-xs font-medium uppercase transition-colors",
-                      exportFormat === fmt
-                        ? "bg-[#2f6fde] text-white"
-                        : "bg-[#1f232a] hover:bg-[#23262c]"
-                    )}
-                    style={exportFormat !== fmt ? { color: "#c4c9d2" } : undefined}
-                  >
-                    {fmt}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Quality (only for JPEG/WebP) */}
-            {(exportFormat === "jpeg" || exportFormat === "webp") && (
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                    Quality
-                  </Label>
-                  <span className="text-xs font-mono" style={{ color: "#8b919c" }}>
-                    {exportQuality}%
-                  </span>
-                </div>
-                <Slider
-                  value={[exportQuality]}
-                  onValueChange={([v]) => setExportQuality(v)}
-                  min={10}
-                  max={100}
-                  step={5}
-                />
-              </div>
-            )}
-
-            {/* Scale (not for SVG) */}
-            {exportFormat !== "svg" && (
-              <div className="space-y-1.5">
-                <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                  Scale
-                </Label>
-                <div className="grid grid-cols-4 gap-2">
-                  {[1, 2, 3, 4].map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => setExportScale(s)}
-                      className={cn(
-                        "h-9 rounded-lg text-xs font-medium transition-colors",
-                        exportScale === s
-                          ? "bg-[#2f6fde] text-white"
-                          : "bg-[#1f232a] hover:bg-[#23262c]"
-                      )}
-                      style={exportScale !== s ? { color: "#c4c9d2" } : undefined}
-                    >
-                      {s}x
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[10px]" style={{ color: "#8b919c" }}>
-                  Output: {(template?.width || 1080) * exportScale} × {(template?.height || 1350) * exportScale}px
-                </p>
-              </div>
-            )}
-
-            {/* Export button */}
-            <Button
-              onClick={doExport}
-              className="w-full bg-[#2f6fde] hover:bg-[#2561c7] text-white"
-            >
-              <Download className="mr-2 h-4 w-4" />
-              Export {exportFormat.toUpperCase()}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        exportFormat={exportFormat}
+        setExportFormat={setExportFormat}
+        exportQuality={exportQuality}
+        setExportQuality={setExportQuality}
+        exportScale={exportScale}
+        setExportScale={setExportScale}
+        exportFps={exportFps}
+        setExportFps={setExportFps}
+        exportDuration={exportDuration}
+        setExportDuration={setExportDuration}
+        exportVideoQuality={exportVideoQuality}
+        setExportVideoQuality={setExportVideoQuality}
+        canvasHasVideo={canvasHasVideo}
+        templateWidth={template?.width || 1080}
+        templateHeight={template?.height || 1350}
+        onExport={doExport}
+      />
     </>
   );
 }

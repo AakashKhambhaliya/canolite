@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @next/next/no-img-element */
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
@@ -46,6 +47,7 @@ import {
   LayoutGrid,
   Loader2,
   FileImage,
+  Video,
 } from "lucide-react";
 import { cn, formatRelativeTime, copyToClipboard } from "@/lib/utils";
 import { Label } from "@/components/ui/label";
@@ -227,6 +229,12 @@ export default function TemplatesPage() {
                   />
                 ) : (
                   <FileImage className="h-12 w-12 text-gray-300 dark:text-gray-600" />
+                )}
+                {template.hasVideo && (
+                  <Badge className="absolute left-2 top-2 gap-1 bg-black/70 text-white border-0">
+                    <Video className="h-3 w-3" />
+                    Video
+                  </Badge>
                 )}
                 {/* Hover overlay */}
                 <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
