@@ -1,6 +1,6 @@
 # Canolite
 
-**Self-hosted template-to-image generation platform.** Design templates in a visual editor, generate images via API. A self-hosted Bannerbear/Templated.io alternative.
+**Self-hosted template-to-image and video generation platform.** Design templates in a visual editor, then generate images **and MP4 video** via API. A self-hosted Bannerbear/Templated.io alternative.
 
 ![Next.js](https://img.shields.io/badge/Next.js-15-black) ![React](https://img.shields.io/badge/React-19-blue) ![Fabric.js](https://img.shields.io/badge/Fabric.js-6-orange) ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -10,8 +10,9 @@
 
 ## Features
 
-- 🎨 **Visual Template Editor** — Fabric.js drag-and-drop editor with text, images, shapes, **layer reordering**, **alignment/snapping guides**, **all Google Fonts + custom font upload**
-- 🔗 **REST API** — Bannerbear-style API for single and batch image generation
+- 🎨 **Visual Template Editor** — Fabric.js drag-and-drop editor with text, images, shapes, **video layers**, **layer reordering**, **alignment/snapping guides**, **all Google Fonts + custom font upload**
+- 🎬 **Video templates → MP4** — Drop in an MP4/WebM/MOV, trim it, set when it starts, loop and mute it, then export the whole design as H.264 video with every other layer composited on top. ffmpeg ships with the app
+- 🔗 **REST API** — Bannerbear-style API for single and batch image **and video** generation
 - 🔌 **n8n integration** — Official [community node](https://www.npmjs.com/package/n8n-nodes-canolite) to generate images from your automation workflows
 - 📊 **Bulk CSV Import** — Upload a spreadsheet to generate hundreds of images at once
 - 🔑 **API Key Management** — Create/revoke keys with secure hashing (shown once)
@@ -22,7 +23,7 @@
 - ⚙️ **Per-project defaults** — Default format/quality/scale + configurable **render retention** with automatic cleanup
 - 🔒 **Single-admin auth** — One-time setup wizard, no public sign-up
 - 🔄 **Self-update checker** — One-click updates (git self-update, or Coolify redeploy)
-- ⚡ **Runs without Docker** — Self-contained on plain Node (in-process DB + local storage), or point it at an external **PostgreSQL**
+- ⚡ **Runs without Docker** — `npm run setup` and it's up: embedded PostgreSQL + local storage, no `.env` and no external services. Or point it at an external **PostgreSQL**
 
 ---
 
@@ -88,7 +89,7 @@ services:
 
 - **Database** → embedded PostgreSQL by default, persisted to `./data/pgdata` locally or `/app/data/pgdata` in Docker
 - **Storage** → local filesystem under `public/storage` (or `STORAGE_DIR`)
-- **Rendering** → synchronous, in-process (headless Chromium + Sharp)
+- **Rendering** → synchronous, in-process (headless Chromium + Sharp, plus bundled ffmpeg for MP4)
 
 Schema migrations run automatically on boot, with an automatic backup taken
 before any pending migration. Demo data is only inserted in development (set
@@ -148,6 +149,12 @@ Next.js App  ──┬── Dashboard pages (editor, templates, keys, playgroun
         │  render in headless Chromium (Fabric.js) → Sharp post-process → store
         ▼
 Render pipeline (synchronous, in-process)
+        │
+        ├── Image (png/jpg/webp): one Chromium paint → Sharp → store
+        │
+        ├── Video (mp4): ffmpeg decodes each source clip to frames →
+        │     Chromium paints one canvas per output frame →
+        │     ffmpeg encodes H.264 + audio → store (job reports progress)
         │
         ├── Database: embedded PostgreSQL (default) or external PostgreSQL
         └── Storage:  local filesystem (persist with a volume)
@@ -288,8 +295,9 @@ Create a **Canolite API** credential in n8n with:
 |-----------|-----------|
 | Framework | Next.js 15 (App Router) · React 19 |
 | Language | TypeScript 5 |
-| Editor | Fabric.js 6 — snapping, layer reorder, Google Fonts, custom fonts |
+| Editor | Fabric.js 6 — snapping, layer reorder, Google Fonts, custom fonts, video layers |
 | Rendering | Synchronous & in-process — headless Chromium (Playwright) + Sharp |
+| Video | ffmpeg / ffprobe (bundled) — H.264 + AAC MP4 encoding |
 | Database | Embedded PostgreSQL zero-config default · external PostgreSQL for production |
 | Storage | Local filesystem (persist with a volume) |
 | UI | Tailwind CSS 4 + shadcn/ui + Radix UI |
@@ -320,8 +328,11 @@ If `DATABASE_URL` is unset, Canolite starts embedded PostgreSQL on `127.0.0.1` u
 | `DB_SSL` | auto | For non-local PostgreSQL hosts, SSL is enabled automatically. Set `DB_SSL=disable` only for trusted private networks that do not support SSL. |
 | `ADMIN_EMAIL` | — | Optional: auto-provision admin email on boot (skips the setup wizard) |
 | `ADMIN_PASSWORD` | — | Optional: auto-provision admin password on boot (skips the setup wizard) |
+| `STORAGE_DIR` | `public/storage` | Where rendered output and uploads are written. Docker sets `/app/data/storage`. |
+| `BACKUP_DIR` | `./.backups` | Where pre-migration database backups are written. Falls back to `/app/data/backups` automatically when that directory exists (i.e. in Docker). |
+| `RENDER_CONCURRENCY` | `3` | Maximum in-process image renders at once |
 | `MAX_UPLOAD_MB` | `10` | Max image/font upload file size |
-| `MAX_VIDEO_UPLOAD_MB` | `100` | Max video upload size in MB |
+| `MAX_VIDEO_UPLOAD_MB` | `100` | Max video upload size in MB. The request-body limit follows this value, so raising it raises both. |
 | `MAX_VIDEO_DURATION_SEC` | `60` | Max uploaded source video duration in seconds |
 | `MAX_VIDEO_PIXELS` | `8294400` | Max uploaded source video resolution as width × height pixels |
 | `FFMPEG_PATH` / `FFPROBE_PATH` | package binary | Optional absolute paths to ffmpeg/ffprobe executables |
@@ -329,8 +340,12 @@ If `DATABASE_URL` is unset, Canolite starts embedded PostgreSQL on `127.0.0.1` u
 | `VIDEO_PROBE_TIMEOUT_MS` / `VIDEO_POSTER_TIMEOUT_MS` | `60000` / `60000` | Timeout budget for upload video probing and poster extraction |
 | `VIDEO_DEFAULT_FPS` / `VIDEO_MAX_FPS` | `30` / `60` | Default and maximum MP4 render frame rate |
 | `VIDEO_MAX_OUTPUT_SEC` | `120` | Maximum MP4 output duration |
+| `VIDEO_DECODE_TIMEOUT_MS` | `300000` | Timeout budget for decoding a source clip to frames |
 | `VIDEO_CONCURRENCY` | `1` | Maximum in-process video renders at once |
-| `AUTH_SECRET` | — | Reserved for session signing |
+
+Sessions are random tokens stored in the database, so there is no signing secret
+to configure. `AUTH_SECRET` and `NEXTAUTH_URL` still appear in `.env.example`
+but are not read anywhere — you can leave them unset.
 
 ---
 
