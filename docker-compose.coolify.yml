@@ -25,6 +25,15 @@ services:
     # Raspberry Pi. No build step on any of them.
     image: ghcr.io/aakashkhambhaliya/canolite:latest
 
+    # Compose's default pull policy is "missing": it pulls only when the tag is
+    # absent locally. Because the tag here is the MOVING `latest`, a host that
+    # already had it would keep re-running its cached copy on every redeploy —
+    # so the app stayed on whatever version was first deployed while `latest`
+    # moved on in the registry, with nothing to indicate anything was stale.
+    # `always` re-resolves the tag each time, which is the only behaviour that
+    # makes "redeploy" mean "get the current release".
+    pull_policy: always
+
     environment:
       # Coolify injects COOLIFY_FQDN into the compose environment (you can see
       # it in the deploy command it runs). APP_URL reuses it so the image URLs

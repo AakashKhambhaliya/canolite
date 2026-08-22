@@ -7,6 +7,11 @@
 #
 #   docker compose up -d --build
 #
+# To UPGRADE to a newer release, pull first — `up -d` on its own reuses the
+# cached `latest` and silently keeps running the old version:
+#
+#   docker compose pull && docker compose up -d
+#
 # Then open the app and create your admin account (setup wizard), or set
 # ADMIN_EMAIL / ADMIN_PASSWORD below to skip it.
 # ============================================================
