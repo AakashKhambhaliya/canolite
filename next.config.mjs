@@ -76,27 +76,38 @@ const nextConfig = {
         source: "/storage/:path*",
         headers: [
           { key: "Access-Control-Allow-Origin", value: "*" },
-          // These two are the stored-file safety net, and they have to be
-          // declared HERE for the same reason as the CORS header above: with
-          // STORAGE_DIR at its default the files sit under public/ and Next's
-          // STATIC handler serves them, so the copies set in the /storage
-          // route handler never run. Setting them only there left every
-          // default install serving user-uploaded bytes bare.
-          //
-          // nosniff stops the browser from MIME-sniffing an upload into
-          // something executable. The CSP neutralizes the one stored format
-          // that can carry script — an SVG served inline from our own origin
-          // is a stored-XSS vector, since <svg> can hold <script>/onload that
-          // runs in this origin's context. `default-src 'none'` + `sandbox`
-          // means an <img src>/<object> still paints the drawing but never
-          // executes code.
-          //
-          // Applying the CSP to every stored file (not just .svg) is safe:
-          // CSP governs documents and workers, so it has no effect on an
-          // image/video/font loaded as a subresource, and on direct
-          // navigation to one it only sandboxes a document that should never
-          // have been running script anyway.
+          // nosniff stops the browser MIME-sniffing user-supplied bytes into
+          // something executable. Safe on every stored type, so it applies to
+          // all of them. It has to be declared HERE for the same reason as the
+          // CORS header above: with STORAGE_DIR at its default the files sit
+          // under public/ and Next's STATIC handler serves them, so a copy set
+          // in the /storage route handler would never run.
           { key: "X-Content-Type-Options", value: "nosniff" },
+        ],
+      },
+      {
+        // The script-blocking CSP applies to SVG ONLY, and the scoping is
+        // load-bearing.
+        //
+        // SVG is the one stored format that can execute: a crafted <svg> can
+        // carry <script>/onload that runs in this origin's context, so serving
+        // one inline is a stored-XSS vector. `default-src 'none'` + `sandbox`
+        // means an <img src>/<object> still paints the drawing but never runs
+        // code.
+        //
+        // Applying that same policy to EVERY stored file looked harmless —
+        // reasoning that CSP governs documents, not subresources — but that
+        // misses what a browser does when you navigate straight to a media
+        // file. It synthesises a document wrapping a <video>, and the response's
+        // CSP governs THAT document: `default-src 'none'` implies
+        // `media-src 'none'`, so the player renders black and stuck at 0:00.
+        // `sandbox` without `allow-downloads` blocks saving the file too. Every
+        // stored MP4 became unplayable and undownloadable by direct link.
+        //
+        // Raster images, video and fonts cannot execute, so they need nothing
+        // beyond the nosniff above.
+        source: "/storage/:path*.svg",
+        headers: [
           {
             key: "Content-Security-Policy",
             value: "default-src 'none'; style-src 'unsafe-inline'; sandbox",
