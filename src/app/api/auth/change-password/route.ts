@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { users } from "@/db/schema";
+import { sessions, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
-import { getCurrentUser } from "@/lib/auth";
+import { createSession, getCurrentUser } from "@/lib/auth";
 import { getAdminUser, hashPassword, verifyPassword } from "@/lib/admin";
 
 /**
@@ -65,6 +65,14 @@ export async function POST(request: Request) {
     }
 
     await db.update(users).set(updates).where(eq(users.id, admin.id));
+
+    // Changing the password is how an operator revokes access after a laptop
+    // is lost or a session token leaks — but sessions are looked up by token
+    // alone, so every previously issued token stayed valid until its 30-day
+    // expiry and the change accomplished nothing. Drop them all, then mint a
+    // fresh one so the browser that just did the change stays signed in.
+    await db.delete(sessions).where(eq(sessions.userId, admin.id));
+    await createSession(admin.id);
 
     return NextResponse.json({ message: "Password updated" });
   } catch (error) {

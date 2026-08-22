@@ -177,7 +177,14 @@ export async function POST(request: Request) {
       .insert(assets)
       .values({
         projectId: user.projectId,
-        name: file.name,
+        // The SANITIZED name, not the raw client-supplied one. For fonts this
+        // column is what /api/fonts turns into a CSS font-family (name minus
+        // extension), which then lands in a @font-face rule in the headless
+        // render page — so a name carrying quotes or markup is an injection
+        // source. buildFontHead escapes it too; storing it clean means the
+        // family the editor registers and the one the renderer declares stay
+        // identical instead of diverging at escape time.
+        name: safeName,
         url,
         type: isVideo ? "video" : file.type.startsWith("image") ? "image" : "font",
         mimeType: file.type,

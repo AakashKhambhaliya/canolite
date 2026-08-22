@@ -64,6 +64,12 @@ const CANVAS_PRESETS = [
   { name: "Custom", width: 1080, height: 1350 },
 ];
 
+// Bounds for the Custom preset's width/height inputs. Kept below the server's
+// hard cap (MAX_CANVAS_DIMENSION in lib/validation) — this is the practical
+// design limit, that one is the "never let this reach the renderer" limit.
+const MIN_CUSTOM_DIMENSION = 100;
+const MAX_CUSTOM_DIMENSION = 10000;
+
 export default function TemplatesPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -87,17 +93,32 @@ export default function TemplatesPage() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
+      // The min/max on the number Inputs below are advisory — the browser
+      // still hands us whatever was typed, and a cleared field reads back as
+      // 0. Clamp here so a slip becomes a usable template instead of a 400
+      // from the server-side dimension check.
+      const clamp = (value: number, fallback: number) =>
+        Number.isFinite(value) && value > 0
+          ? Math.min(MAX_CUSTOM_DIMENSION, Math.max(MIN_CUSTOM_DIMENSION, Math.round(value)))
+          : fallback;
       const width =
-        selectedPreset.name === "Custom" ? customWidth : selectedPreset.width;
+        selectedPreset.name === "Custom"
+          ? clamp(customWidth, 1080)
+          : selectedPreset.width;
       const height =
-        selectedPreset.name === "Custom" ? customHeight : selectedPreset.height;
+        selectedPreset.name === "Custom"
+          ? clamp(customHeight, 1350)
+          : selectedPreset.height;
 
       const res = await fetch("/api/templates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName, width, height }),
+        body: JSON.stringify({ name: newName.trim() || "Untitled Template", width, height }),
       });
-      if (!res.ok) throw new Error("Failed to create template");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to create template");
+      }
       return res.json();
     },
     onSuccess: (data) => {
@@ -106,8 +127,8 @@ export default function TemplatesPage() {
       toast.success("Template created");
       router.push(`/editor/${data.id}`);
     },
-    onError: () => {
-      toast.error("Failed to create template");
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to create template");
     },
   });
 
@@ -374,8 +395,8 @@ export default function TemplatesPage() {
                     type="number"
                     value={customWidth}
                     onChange={(e) => setCustomWidth(Number(e.target.value))}
-                    min={100}
-                    max={10000}
+                    min={MIN_CUSTOM_DIMENSION}
+                    max={MAX_CUSTOM_DIMENSION}
                   />
                 </div>
                 <div className="flex-1 space-y-2">
@@ -384,8 +405,8 @@ export default function TemplatesPage() {
                     type="number"
                     value={customHeight}
                     onChange={(e) => setCustomHeight(Number(e.target.value))}
-                    min={100}
-                    max={10000}
+                    min={MIN_CUSTOM_DIMENSION}
+                    max={MAX_CUSTOM_DIMENSION}
                   />
                 </div>
               </div>

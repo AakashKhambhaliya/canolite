@@ -74,7 +74,34 @@ const nextConfig = {
         // PUBLIC_ROUTES in middleware.ts), so permitting cross-origin reads of
         // bytes anyone can already GET does not widen access.
         source: "/storage/:path*",
-        headers: [{ key: "Access-Control-Allow-Origin", value: "*" }],
+        headers: [
+          { key: "Access-Control-Allow-Origin", value: "*" },
+          // These two are the stored-file safety net, and they have to be
+          // declared HERE for the same reason as the CORS header above: with
+          // STORAGE_DIR at its default the files sit under public/ and Next's
+          // STATIC handler serves them, so the copies set in the /storage
+          // route handler never run. Setting them only there left every
+          // default install serving user-uploaded bytes bare.
+          //
+          // nosniff stops the browser from MIME-sniffing an upload into
+          // something executable. The CSP neutralizes the one stored format
+          // that can carry script — an SVG served inline from our own origin
+          // is a stored-XSS vector, since <svg> can hold <script>/onload that
+          // runs in this origin's context. `default-src 'none'` + `sandbox`
+          // means an <img src>/<object> still paints the drawing but never
+          // executes code.
+          //
+          // Applying the CSP to every stored file (not just .svg) is safe:
+          // CSP governs documents and workers, so it has no effect on an
+          // image/video/font loaded as a subresource, and on direct
+          // navigation to one it only sandboxes a document that should never
+          // have been running script anyway.
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          {
+            key: "Content-Security-Policy",
+            value: "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+          },
+        ],
       },
     ];
   },

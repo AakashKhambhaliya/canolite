@@ -4,6 +4,96 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.9.0
+
+**Video layers play in the editor.**
+
+A video layer used to be a still poster frame on the canvas. The only way to
+see what it actually did was to run a full MP4 render and watch the result.
+Select a video layer and its properties panel now has a transport — play,
+pause, stop, and a scrubber — that plays the real clip on the canvas.
+
+It runs on the same timeline the renderer uses, so what you watch is what
+encodes: the same trim window, `Start at` offset, loop wrap and playback rate.
+Trim, fit, loop and audio settings apply *while it is playing*, so you can dial
+in a trim point and see it immediately. On designs with more than one clip, a
+**Preview all layers** switch plays the whole composition from zero instead of
+the selected clip on its own.
+
+Playback never touches the saved design. It draws through the layer's paint
+method rather than swapping the underlying image element, so a template saved
+mid-preview is byte-for-byte what it would have been at rest.
+
+**MP4 works in the Playground.**
+
+The Playground only ever offered PNG, JPG and WebP, so video templates could
+not be exercised there at all. MP4 is now offered for templates that contain a
+video layer, with frame-rate, duration and quality-preset controls, a live
+progress bar while the render encodes, and a `<video>` player for the result.
+The generated cURL snippet switches to `POST /v1/videos` to match — the
+previous one showed `/v1/images`, which rejects `format: "mp4"` outright.
+
+### Security
+
+- **Uploaded SVGs were served without their protective headers on default
+  installs.** The `Content-Security-Policy` and `X-Content-Type-Options` that
+  defuse a script-bearing SVG were set only in the `/storage` route handler,
+  but with `STORAGE_DIR` unset — the default — those files live under `public/`
+  and are served by Next's static handler, which never reaches that route. Both
+  headers are now declared in `next.config.mjs` so they cover every install.
+- **Sign-in had no brute-force protection.** A Canolite instance has exactly one
+  account, so an unthrottled login endpoint is a single-target password oracle.
+  Failed attempts are now limited per client (10 per 15 minutes) with a global
+  backstop against distributed attempts, checked before the password hash is
+  computed. A successful sign-in clears the caller's counter.
+- **Changing the password did not sign other sessions out.** Sessions are looked
+  up by token alone, so every previously issued token stayed valid for its full
+  30 days — the change did nothing to lock out a stolen session. All sessions
+  are now dropped and the current browser is re-issued one.
+- **A custom font's name could inject markup into the renderer.** The font
+  family is derived from the uploaded file's name and was interpolated straight
+  into a `<style>` block in the headless render page, so a name containing a
+  quote or `</style>` escaped its rule. Both the family and the URL are now
+  escaped, and the uploaded name is sanitized at rest.
+- **`GET /api/cleanup` deleted renders.** Session cookies are `SameSite=Lax`,
+  which still attaches them to top-level GET navigations, so any page that got
+  an operator to follow a link could wipe their render history. `GET` now
+  reports how many renders are eligible; deletion stays on `POST`.
+- **Session tokens and API keys were slightly biased.** Random bytes were mapped
+  onto the 62-character alphabet with `%`, over-representing eight characters by
+  about 25%. Now generated with rejection sampling.
+- **Template dimensions were unbounded.** A template saved with an absurd width
+  or height became an out-of-memory failure in every later render of it — a
+  stored denial of service. Dimensions are validated to 1–16384px.
+
+### Fixes
+
+- **The editor canvas was destroyed and rebuilt on every save.** The Fabric
+  initialisation effect depended on the whole template query object while its
+  cleanup reset the "already initialised" guard, so refreshing the cache after a
+  save tore the live canvas down and recreated it — discarding the selection and
+  the entire undo history. It now re-runs only when a genuinely different
+  template is opened.
+- **Resuming a paused video preview restarted it from the beginning**, and
+  **seeking near the end broke looping** — playback rewound to the seek point,
+  which is instantly past the end again, and thrashed against the last frame.
+  Both came from one value serving as the clock's reference point and the start
+  of the timeline at once; they are now separate.
+- **Retention cleanup orphaned every video render's poster.** The sweep removed
+  only `imageUrl`, leaving one JPEG per video render on disk permanently.
+- **Rendered video and image jobs had no status endpoint for the dashboard.**
+  `GET /api/renders/:id` now returns a single job's status and progress,
+  accepting either the row id or the public `uid`.
+- **Creating a template reported a generic failure.** The server's actual
+  validation message is now surfaced, and the custom width/height inputs are
+  clamped rather than sending a blank field as `0`.
+
+### Dependencies
+
+`brace-expansion` and `js-yaml` updated for published advisories, and the
+lockfile regenerated — it had drifted out of sync with `package.json`, still
+declaring v1.7.0 and a dependency that had been removed.
+
 ## v1.8.0
 
 **Canolite renders video.**

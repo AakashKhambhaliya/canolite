@@ -9,6 +9,7 @@ import { Logo } from "@/components/logo";
 import { installSnapping } from "@/lib/editor/snapping";
 import { ensureFont, registerCustomFont } from "@/lib/editor/font-loader";
 import { EXTRA_PROPS } from "@/lib/editor/serialized-props";
+import { VideoPreview, type VideoPreviewState } from "@/lib/editor/video-preview";
 import { FontPicker, type CustomFont } from "@/components/editor/font-picker";
 import { ExportDialog } from "@/components/editor/export-dialog";
 import { Button } from "@/components/ui/button";
@@ -65,6 +66,9 @@ import {
   Loader2,
   Circle,
   Triangle,
+  Play,
+  Pause,
+  RotateCcw,
   Minus as LineIcon,
   MousePointer,
   SlidersHorizontal,
@@ -111,6 +115,14 @@ function refreshTextFonts(canvas: any) {
   if (typeof requestAnimationFrame !== "undefined") {
     requestAnimationFrame(() => canvas.renderAll());
   }
+}
+
+/** Seconds as m:ss.d, for the video playback readout. */
+function formatClock(seconds: number): string {
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const mins = Math.floor(safe / 60);
+  const secs = safe - mins * 60;
+  return `${mins}:${secs < 10 ? "0" : ""}${secs.toFixed(1)}`;
 }
 
 export default function EditorPage() {
@@ -170,6 +182,34 @@ export default function EditorPage() {
   // Force re-render helper
   const [, forceUpdate] = useState(0);
   const rerender = useCallback(() => forceUpdate((n) => n + 1), []);
+
+  // ---- Video preview -------------------------------------------------------
+  // Plays the real clips on the canvas instead of their static poster frames.
+  // The controller owns the <video> elements and the animation loop; see
+  // lib/editor/video-preview.ts for why it never mutates the Fabric objects'
+  // serialized state.
+  const videoPreviewRef = useRef<VideoPreview | null>(null);
+  const [previewState, setPreviewState] = useState<VideoPreviewState>({
+    playing: false,
+    time: 0,
+    duration: 0,
+    soloLayerId: null,
+    ready: false,
+  });
+  // Preview the composed timeline (every clip, from t=0) rather than just the
+  // selected one. Only surfaced when the design has more than one video layer,
+  // since with a single clip the two modes differ only in whether its
+  // `Start at` delay is played out as dead time first.
+  const [previewAllLayers, setPreviewAllLayers] = useState(false);
+
+  // Halt any preview before an operation that reads or replaces the canvas.
+  // Saving and exporting are safe either way (the preview leaves no trace in
+  // toObject()), but a running preview holds references to live Fabric objects
+  // that undo/redo is about to throw away, and leaving a clip playing over a
+  // canvas the user just navigated off is disorienting.
+  const stopVideoPreview = useCallback(() => {
+    videoPreviewRef.current?.stop();
+  }, []);
 
   // ---- Undo / redo history -------------------------------------------------
   // Fabric v6 has no built-in history, so we keep a bounded stack of canvas
@@ -320,6 +360,9 @@ export default function EditorPage() {
     async (json: string) => {
       const canvas = fabricCanvasRef.current;
       if (!canvas) return;
+      // loadFromJSON below replaces every object on the canvas, so a running
+      // preview would be left driving detached ones.
+      stopVideoPreview();
       const h = historyRef.current;
       h.restoring = true;
       loadingRef.current = true;
@@ -335,7 +378,7 @@ export default function EditorPage() {
       updateLayers();
       rerender();
     },
-    [updateLayers, rerender]
+    [updateLayers, rerender, stopVideoPreview]
   );
 
   const undo = useCallback(() => {
@@ -448,8 +491,14 @@ export default function EditorPage() {
     []
   );
 
+  // The latest fetched template, for the init effect below to read WITHOUT
+  // taking a dependency on the query object's identity. See the effect's deps.
+  const templateRef = useRef<any>(null);
+  templateRef.current = template;
+
   // Initialize Fabric canvas — once per mount, from the loaded template.
   useEffect(() => {
+    const template = templateRef.current;
     if (!canvasRef.current || !template || initializedRef.current) return;
     initializedRef.current = true;
 
@@ -562,7 +611,12 @@ export default function EditorPage() {
         updateLayers();
         snapshotRef.current();
       });
-      canvas.on("object:removed", () => {
+      canvas.on("object:removed", (e: any) => {
+        // Deleting a clip mid-preview would leave the controller driving a
+        // detached object. Catching it here covers every delete path — the
+        // Delete key, the properties panel, the layer list, replaceImage —
+        // instead of needing a stop() call at each one.
+        if (e?.target?.mediaType === "video") videoPreviewRef.current?.stop();
         if (!loadingRef.current) setSaved(false);
         updateLayers();
         snapshotRef.current();
@@ -592,7 +646,18 @@ export default function EditorPage() {
       }
       setCanvasReady(false);
     };
-  }, [template?.id, template, updateLayers, rerender]);
+    // Keyed on the template's IDENTITY, never the query object.
+    //
+    // `template` used to be a dependency, which quietly defeated the
+    // initializedRef guard above: the cleanup resets that ref and disposes the
+    // canvas, so every change to the query object's reference — a background
+    // refetch, and above all the setQueryData in saveMutation.onSuccess — tore
+    // the live canvas down and rebuilt it. Saving therefore dropped the
+    // selection and wiped the whole undo stack. The effect only ever READS the
+    // template (to size the canvas and load its design), so it takes the
+    // latest one from templateRef instead and re-runs only when a genuinely
+    // different template is opened.
+  }, [template?.id, updateLayers, rerender]);
 
   // Apply zoom via Fabric's native viewport (NOT a CSS transform). CSS-scaling
   // the canvas wrapper breaks in-canvas text editing (mis-positioned textarea /
@@ -751,10 +816,55 @@ export default function EditorPage() {
     setZoom(100);
   }, [canvasReady, template?.id]);
 
+  // Own one preview controller per live canvas. Disposing it on teardown is
+  // what stops the animation loop and releases the <video> elements (and their
+  // network streams) when the editor unmounts or the canvas is rebuilt.
+  useEffect(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvasReady || !canvas) return;
+
+    const preview = new VideoPreview(canvas, setPreviewState, () =>
+      toast.info(
+        "Previewing muted — the browser blocked audible autoplay. The exported MP4 still carries its audio."
+      )
+    );
+    videoPreviewRef.current = preview;
+
+    return () => {
+      preview.dispose();
+      if (videoPreviewRef.current === preview) videoPreviewRef.current = null;
+      setPreviewState({
+        playing: false,
+        time: 0,
+        duration: 0,
+        soloLayerId: null,
+        ready: false,
+      });
+    };
+  }, [canvasReady]);
+
+  // Play / pause the whole composition, or one clip on its own when a layer id
+  // is given. Called from the transport bar and the video properties panel.
+  const togglePreview = useCallback(
+    (soloLayerId: string | null = null) => {
+      const preview = videoPreviewRef.current;
+      if (!preview) return;
+      const state = preview.getState();
+      if (state.playing && state.soloLayerId === soloLayerId) preview.pause();
+      else preview.play(soloLayerId);
+    },
+    []
+  );
+
   // Save handler
   const handleSave = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
+    // Not strictly required — the preview deliberately leaves no trace in
+    // toObject() — but a save is a natural resting point, and stopping here
+    // means the thumbnail the server regenerates depicts the poster frames the
+    // design actually stores.
+    stopVideoPreview();
     setSaving(true);
 
     // Fabric's toJSON crashes ("Cannot read properties of undefined (reading
@@ -789,7 +899,7 @@ export default function EditorPage() {
         scale: outputScale !== "" ? Number(outputScale) : undefined,
       },
     });
-  }, [templateName, template, saveMutation, outputFormat, outputQuality, outputScale]);
+  }, [templateName, template, saveMutation, outputFormat, outputQuality, outputScale, stopVideoPreview]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -1113,6 +1223,11 @@ export default function EditorPage() {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
 
+    // A PNG/JPG export re-renders the canvas at export scale, and the MP4 path
+    // toggles zoom around it — neither should race an animation loop that is
+    // repainting the same canvas.
+    stopVideoPreview();
+
     if (exportFormat === "mp4") {
       try {
         const json = canvas.toObject([...EXTRA_PROPS]);
@@ -1198,7 +1313,7 @@ export default function EditorPage() {
     }
     setExportOpen(false);
     toast.success(`Exported as ${exportFormat.toUpperCase()}`);
-  }, [templateName, exportFormat, exportQuality, exportScale, exportFps, exportDuration, exportVideoQuality, zoom, fitPct, template, outputFormat, outputQuality, outputScale, router]);
+  }, [templateName, exportFormat, exportQuality, exportScale, exportFps, exportDuration, exportVideoQuality, zoom, fitPct, template, outputFormat, outputQuality, outputScale, router, stopVideoPreview]);
 
   // Update selected object property
   const updateProp = useCallback(
@@ -1349,6 +1464,12 @@ export default function EditorPage() {
     objType === "textbox" || objType === "text" || objType === "i-text";
   const isVideo = objType === "image" && (activeObj as any)?.mediaType === "video";
   const isImage = objType === "image" && !isVideo;
+  // How the preview controller identifies this layer — same fallback chain it
+  // uses (see VideoPreview.layerId). Empty until updateLayers has stamped an
+  // id on the object, which disables the solo-play button until then.
+  const activeLayerId = isVideo
+    ? (activeObj as any)?.id || (activeObj as any)?.name || ""
+    : "";
   const isShape =
     objType === "rect" ||
     objType === "circle" ||
@@ -1357,9 +1478,19 @@ export default function EditorPage() {
     objType === "polygon" ||
     objType === "line";
   const isMultiSelect = objType === "activeselection";
-  const canvasHasVideo = !!fabricCanvasRef.current
-    ?.getObjects()
-    .some((o: any) => o.type === "image" && o.mediaType === "video");
+  const videoLayerCount =
+    fabricCanvasRef.current
+      ?.getObjects()
+      .filter((o: any) => o.type === "image" && o.mediaType === "video").length ?? 0;
+  const canvasHasVideo = videoLayerCount > 0;
+  // The switch is only offered for multi-clip designs, so a stale `true` left
+  // over from before a clip was deleted must not keep forcing composed mode.
+  const previewAll = previewAllLayers && videoLayerCount > 1;
+  // True when the running preview is the one this panel's play button started,
+  // so the button shows Pause for it and Play for everything else.
+  const isPreviewingThisLayer =
+    previewState.playing &&
+    previewState.soloLayerId === (previewAll ? null : activeLayerId);
 
   const alignButtons: Array<{
     mode: "left" | "centerH" | "right" | "top" | "middle" | "bottom";
@@ -2152,6 +2283,107 @@ export default function EditorPage() {
                                 {Number(getProp("videoDuration", 0) || 0).toFixed(1)}s
                               </span>
                             </div>
+                          </div>
+
+                          {/* ---- Playback --------------------------------
+                              Plays the real clip on the canvas (the layer
+                              otherwise only ever shows its poster frame), so
+                              the trim and timing settings below can be checked
+                              without waiting on a full MP4 render.
+
+                              Previewing "this clip" starts the timeline at the
+                              layer's own `Start at`, so a clip that appears
+                              late doesn't mean staring at an empty canvas
+                              first. The `All layers` switch (offered only when
+                              there is more than one clip to compose) runs the
+                              whole timeline from 0 instead — the only way to
+                              check how several clips line up. */}
+                          <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] p-2 space-y-2">
+                            <div className="flex items-center gap-1.5">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="h-7 w-7 shrink-0 text-[#e6e8ec] hover:bg-[#23262c] disabled:opacity-40"
+                                    onClick={() =>
+                                      togglePreview(previewAll ? null : activeLayerId)
+                                    }
+                                    disabled={!activeLayerId}
+                                  >
+                                    {isPreviewingThisLayer ? (
+                                      <Pause className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <Play className="h-3.5 w-3.5" />
+                                    )}
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  {isPreviewingThisLayer ? "Pause" : "Play on canvas"}
+                                </TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="h-7 w-7 shrink-0 text-[#8b919c] hover:text-[#e6e8ec] hover:bg-[#23262c] disabled:opacity-40"
+                                    onClick={stopVideoPreview}
+                                    disabled={previewState.duration === 0}
+                                  >
+                                    <RotateCcw className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Stop and show the poster frame</TooltipContent>
+                              </Tooltip>
+
+                              <Slider
+                                value={[previewState.time]}
+                                onValueChange={([v]) => videoPreviewRef.current?.seek(v)}
+                                min={0}
+                                max={previewState.duration || 1}
+                                step={0.05}
+                                disabled={previewState.duration === 0}
+                                className="flex-1 mx-1"
+                              />
+                            </div>
+
+                            <div className="flex items-center justify-between text-[11px]">
+                              <span className="text-[#8b919c]">
+                                {previewState.duration === 0
+                                  ? "Not playing"
+                                  : previewAll
+                                  ? "Whole timeline"
+                                  : "This clip"}
+                              </span>
+                              <span className="font-mono tabular-nums text-[#8b919c]">
+                                {formatClock(previewState.time)} /{" "}
+                                {formatClock(
+                                  previewState.duration ||
+                                    Math.max(
+                                      0,
+                                      Number(getProp("trimEnd", getProp("videoDuration", 0))) -
+                                        Number(getProp("trimStart", 0))
+                                    )
+                                )}
+                              </span>
+                            </div>
+
+                            {videoLayerCount > 1 && (
+                              <div className="flex items-center justify-between pt-0.5">
+                                <Label className="text-[11px] text-[#c4c9d2]">
+                                  Preview all layers
+                                </Label>
+                                <Switch
+                                  checked={previewAll}
+                                  onCheckedChange={(v) => {
+                                    stopVideoPreview();
+                                    setPreviewAllLayers(v);
+                                  }}
+                                />
+                              </div>
+                            )}
                           </div>
                           <div className="grid grid-cols-2 gap-2">
                             <div className="space-y-1.5">

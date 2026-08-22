@@ -37,6 +37,33 @@ function collectFamilies(designJson: any): string[] {
 }
 
 /**
+ * Escape a value for inclusion inside a single-quoted CSS string.
+ *
+ * Both halves of a @font-face rule below are attacker-influenced: the family
+ * name is derived from an uploaded font file's NAME, and the URL is whatever
+ * was stored for that asset. Interpolated raw, a name containing `'` closes
+ * the string, and one containing `</style>` closes the element outright — the
+ * result is injected markup, and therefore script, in the headless render page.
+ * Backslash-escaping the quote and the backslash is what CSS itself specifies;
+ * newlines are dropped because a raw newline terminates a CSS string.
+ */
+function cssString(value: string): string {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/[\r\n\f]/g, "");
+}
+
+/**
+ * Escape `<` so no interpolated value can close the surrounding <style>
+ * element. CSS-escaping alone doesn't help here: the HTML parser finds
+ * `</style>` inside the stylesheet text regardless of CSS quoting.
+ */
+function styleText(css: string): string {
+  return css.replace(/</g, "\\3c ");
+}
+
+/**
  * Build <head> markup that makes the design's fonts available in Chromium.
  *
  * Custom font URLs must already be inlined as `data:` URLs (see
@@ -49,19 +76,22 @@ export function buildFontHead(families: string[], customFonts: CustomFontRef[]):
   for (const family of families) {
     if (customByFamily.has(family)) {
       parts.push(
-        `@font-face{font-family:'${family}';src:url('${customByFamily.get(
-          family
+        `@font-face{font-family:'${cssString(family)}';src:url('${cssString(
+          customByFamily.get(family) || ""
         )}');font-display:block;}`
       );
     } else if (GOOGLE_FONT_META.has(family)) {
+      // Safe by construction — this branch only runs for a family that is a
+      // key of the bundled Google Fonts table — but encode anyway so the rule
+      // doesn't depend on that table never gaining an odd entry.
       const weights = (GOOGLE_FONT_META.get(family) || [400, 700]).join(";");
-      const param = family.replace(/ /g, "+");
+      const param = encodeURIComponent(family).replace(/%20/g, "+");
       parts.push(
         `@import url('https://fonts.googleapis.com/css2?family=${param}:wght@${weights}&display=block');`
       );
     }
   }
-  return parts.length ? `<style>${parts.join("\n")}</style>` : "";
+  return parts.length ? `<style>${styleText(parts.join("\n"))}</style>` : "";
 }
 
 // Inline the Fabric browser build into the render page once.

@@ -593,6 +593,55 @@ async function renderFontTests() {
   assert(head.includes(`font-family:'My Custom'`), "@font-face declares the custom family");
   assert(head.includes("data:font/ttf;base64,AAAA"), "@font-face src is the inlined URL");
   assert(!head.includes("Arial"), "a family with no custom font gets no @font-face");
+
+  // The family name comes from an UPLOADED FILE'S NAME and the URL from that
+  // asset's row, so both are attacker-influenced. Interpolated raw, a quote
+  // ends the CSS string and `</style>` ends the element — injecting markup,
+  // and therefore script, into the headless render page.
+  // Everything between the <style> tags is the stylesheet text; the wrapper's
+  // own tags are the only markup that may appear in the output.
+  const styleBody = (head: string) =>
+    head.replace(/^<style>/, "").replace(/<\/style>$/, "");
+  // A CSS string ends at the first quote NOT preceded by a backslash.
+  const unescapedQuotes = (css: string) =>
+    (css.match(/(^|[^\\])'/g) || []).length;
+
+  const hostile = `x'; } </style><script>fetch('http://169.254.169.254')</script><style>{`;
+  const injected = buildFontHead([hostile], [
+    { family: hostile, url: "data:font/ttf;base64,AAAA" },
+  ]);
+  assertEqual(
+    (injected.match(/<\/?style>/g) || []).length,
+    2,
+    "a hostile font family cannot open or close a <style> element"
+  );
+  assert(
+    !styleBody(injected).includes("<"),
+    "no '<' survives into the stylesheet text, so no tag can be injected"
+  );
+  assertEqual(
+    unescapedQuotes(styleBody(injected)),
+    4,
+    "only the four intended string delimiters are live quotes"
+  );
+  assert(
+    styleBody(injected).endsWith("');font-display:block;}"),
+    "the @font-face rule is still structurally intact"
+  );
+
+  const hostileUrl = buildFontHead(["Fine"], [
+    { family: "Fine", url: `data:font/ttf;base64,AAAA'); } </style><script>x()</script>` },
+  ]);
+  assertEqual(
+    (hostileUrl.match(/<\/?style>/g) || []).length,
+    2,
+    "a hostile font URL cannot break out of the rule either"
+  );
+  assertEqual(
+    unescapedQuotes(styleBody(hostileUrl)),
+    4,
+    "a quote in the URL is escaped rather than closing the url() string"
+  );
 }
 
 // =============================================================
@@ -811,8 +860,281 @@ async function ssrfTests() {
 }
 
 // =============================================================
+// 13. Login rate limiting
+// =============================================================
+console.log("\n13. Login rate limiting\n");
+
+import {
+  checkRateLimit,
+  clearRateLimit,
+  clientKey,
+  recordFailure,
+  __resetRateLimits,
+} from "../../src/lib/rate-limit";
+
+function rateLimitTests() {
+  __resetRateLimits();
+  const cfg = { limit: 3, windowMs: 60_000 };
+
+  assert(checkRateLimit("a", cfg).allowed, "a fresh key is allowed");
+  recordFailure("a", cfg);
+  recordFailure("a", cfg);
+  assert(checkRateLimit("a", cfg).allowed, "under the limit is still allowed");
+
+  const tripped = recordFailure("a", cfg);
+  assert(!tripped.allowed, "the failure that reaches the limit locks the key out");
+  assert(
+    tripped.retryAfterSec > 0,
+    "a lockout reports how long the caller must wait"
+  );
+  assert(!checkRateLimit("a", cfg).allowed, "the lockout persists across checks");
+
+  // Per-key isolation: one attacker being locked out must not lock out the
+  // operator signing in from somewhere else.
+  assert(checkRateLimit("b", cfg).allowed, "a different key is unaffected");
+
+  // A real sign-in wipes the slate, so an operator who mistyped twice is not
+  // left one slip away from a lockout for the rest of the window.
+  clearRateLimit("a");
+  assert(checkRateLimit("a", cfg).allowed, "clearing a key lifts its lockout");
+
+  // An expired window releases the lock.
+  __resetRateLimits();
+  const expiring = { limit: 1, windowMs: 1 };
+  recordFailure("c", expiring);
+  assert(!checkRateLimit("c", expiring).allowed, "a fresh lockout is in force");
+  const releasedAt = Date.now() + 5;
+  while (Date.now() < releasedAt) {
+    /* spin briefly — the window is 1ms */
+  }
+  assert(checkRateLimit("c", expiring).allowed, "the lockout expires with its window");
+
+  const req = new Request("http://localhost/api/auth/login", {
+    headers: { "x-forwarded-for": "203.0.113.7, 10.0.0.1" },
+  });
+  assertEqual(clientKey(req), "203.0.113.7", "clientKey takes the leftmost XFF entry");
+  assertEqual(
+    clientKey(new Request("http://localhost/api/auth/login")),
+    "unknown",
+    "a request with no forwarding headers still yields a stable key"
+  );
+
+  __resetRateLimits();
+}
+
+// =============================================================
+// 14. Token generation
+// =============================================================
+console.log("\n14. Token generation\n");
+
+function tokenTests() {
+  const ALPHABET =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+  assertEqual(generateToken(48).length, 48, "a token is exactly the requested length");
+  assertEqual(generateToken(1).length, 1, "a one-character token is produced");
+  assert(
+    [...generateToken(500)].every((c) => ALPHABET.includes(c)),
+    "every character comes from the alphabet"
+  );
+
+  // `byte % 62` gives the first 8 letters five source values each and the
+  // other 54 only four — a ~25% over-representation on every character of
+  // every session token and API key. Rejection sampling removes it. Sample
+  // enough characters that the old 25% skew is far outside sampling noise
+  // while a uniform generator comfortably passes.
+  const counts = new Map<string, number>();
+  const SAMPLES = 120_000;
+  for (const ch of generateToken(SAMPLES)) {
+    counts.set(ch, (counts.get(ch) || 0) + 1);
+  }
+  const expected = SAMPLES / ALPHABET.length;
+  const biasedHead = [...ALPHABET.slice(0, 8)].reduce(
+    (sum, c) => sum + (counts.get(c) || 0),
+    0
+  ) / 8;
+  const rest = [...ALPHABET.slice(8)].reduce(
+    (sum, c) => sum + (counts.get(c) || 0),
+    0
+  ) / (ALPHABET.length - 8);
+
+  assertEqual(counts.size, ALPHABET.length, "the whole alphabet is reachable");
+  assert(
+    Math.abs(biasedHead / rest - 1) < 0.05,
+    `the previously-biased characters are no more likely than the rest ` +
+      `(ratio ${(biasedHead / rest).toFixed(3)}, expected ~1.000)`
+  );
+  assert(
+    [...counts.values()].every((n) => Math.abs(n / expected - 1) < 0.12),
+    "no single character deviates materially from uniform"
+  );
+
+  // Two tokens colliding would mean two sessions sharing an identity.
+  const seen = new Set<string>();
+  for (let i = 0; i < 2000; i++) seen.add(generateToken(24));
+  assertEqual(seen.size, 2000, "tokens do not repeat");
+}
+
+// =============================================================
+// 15. Editor video preview
+// =============================================================
+console.log("\n15. Editor video preview\n");
+
+import { advancePlayhead, fitRects, sourceTimeAt } from "../../src/lib/editor/video-preview";
+
+function videoPreviewTests() {
+  // The whole point of the in-canvas preview is that it shows what will
+  // encode. It does that only while its time mapping agrees with the
+  // renderer's, so pin the two together: for a range of layer configurations,
+  // the preview's continuous mapping must equal the renderer's per-frame one
+  // at every frame boundary.
+  const fps = 30;
+  const configs = [
+    { trimStart: 0, trimEnd: 4, startAt: 0, loop: true, playbackRate: 1 },
+    { trimStart: 1.5, trimEnd: 3.5, startAt: 0, loop: true, playbackRate: 1 },
+    { trimStart: 0, trimEnd: 2, startAt: 1.25, loop: false, playbackRate: 1 },
+    { trimStart: 0.5, trimEnd: 2.5, startAt: 0.75, loop: true, playbackRate: 2 },
+    { trimStart: 0, trimEnd: 3, startAt: 0, loop: false, playbackRate: 0.5 },
+    // Degenerate: an empty trim window has nothing to show, ever.
+    { trimStart: 2, trimEnd: 2, startAt: 0, loop: true, playbackRate: 1 },
+  ];
+
+  let mismatches = 0;
+  for (const cfg of configs) {
+    const layer = { ...cfg, layerId: "l", name: "l", videoSrc: "/storage/x.mp4", muted: false, volume: 1, hasAudio: false, boxW: 100, boxH: 100, fit: "cover" as const };
+    for (let frame = 0; frame < 200; frame++) {
+      const fromRenderer = sourceTimeForFrame(layer, frame, fps);
+      const fromPreview = sourceTimeAt(cfg, frame / fps);
+      if (fromRenderer === null || fromPreview === null) {
+        if (fromRenderer !== fromPreview) mismatches++;
+      } else if (Math.abs(fromRenderer - fromPreview) > 1e-9) {
+        mismatches++;
+      }
+    }
+  }
+  assertEqual(mismatches, 0, "preview time mapping matches the renderer's at every frame");
+
+  // The specific behaviours that mapping encodes, asserted directly so a
+  // future change to BOTH sides can't silently redefine them together.
+  const clip = { trimStart: 1, trimEnd: 3, startAt: 2, loop: true, playbackRate: 1 };
+  assertEqual(sourceTimeAt(clip, 1.9), null, "a layer is hidden before its startAt");
+  assertEqual(sourceTimeAt(clip, 2), 1, "a layer opens on its trimStart");
+  assertEqual(sourceTimeAt(clip, 3.5), 2.5, "time advances inside the trim window");
+  assertEqual(sourceTimeAt(clip, 4.5), 1.5, "a looping clip wraps back to trimStart");
+  assertEqual(
+    sourceTimeAt({ ...clip, loop: false }, 4.5),
+    null,
+    "a non-looping clip disappears once it runs out"
+  );
+  assertEqual(
+    sourceTimeAt({ ...clip, playbackRate: 2 }, 2.5),
+    2,
+    "playbackRate scales how fast the source is consumed"
+  );
+
+  // Fit geometry must match what ffmpeg does when decoding frames, or the
+  // preview frames a shot differently from the export. Box is 200x100,
+  // source is 100x100.
+  const cover = fitRects(100, 100, 200, 100, "cover");
+  assertEqual(
+    [cover.sx, cover.sy, cover.sw, cover.sh],
+    [0, 25, 100, 50],
+    "cover crops the source to the box's aspect ratio"
+  );
+  assertEqual(
+    [cover.dw, cover.dh, cover.letterbox],
+    [200, 100, false],
+    "cover fills the box completely"
+  );
+
+  const contain = fitRects(100, 100, 200, 100, "contain");
+  assertEqual(
+    [contain.dw, contain.dh, contain.letterbox],
+    [100, 100, true],
+    "contain scales the whole frame down and letterboxes the remainder"
+  );
+  assertEqual([contain.sw, contain.sh], [100, 100], "contain samples the full frame");
+  assertEqual(contain.dx, -50, "contain centres the frame horizontally in the box");
+
+  const stretch = fitRects(100, 100, 200, 100, "stretch");
+  assertEqual(
+    [stretch.sw, stretch.sh, stretch.dw, stretch.dh, stretch.letterbox],
+    [100, 100, 200, 100, false],
+    "stretch distorts the full frame to fill the box"
+  );
+
+  // Destination is centre-origin, because that is the space Fabric hands the
+  // object's _renderFill.
+  assertEqual([stretch.dx, stretch.dy], [-100, -50], "the destination box is centred on the origin");
+
+  // ---- transport clock ----------------------------------------------------
+  // Both of the bugs this covers came from one value trying to be two things:
+  // the clock's reference point AND the start of the timeline.
+  assertEqual(
+    advancePlayhead(0, 1.5, 0, 6),
+    { time: 1.5, wrapped: false },
+    "the playhead advances by the elapsed time"
+  );
+
+  // Resume: the clock is re-based at the PAUSED position, so playing on from
+  // 4.5s must continue to 5.5s — not restart the timeline from its beginning.
+  assertEqual(
+    advancePlayhead(4.5, 1.0, 0, 6),
+    { time: 5.5, wrapped: false },
+    "resuming continues from where it was paused"
+  );
+
+  // Running off the end rewinds to the START of the timeline...
+  assertEqual(
+    advancePlayhead(5.5, 1.0, 0, 6),
+    { time: 0, wrapped: true },
+    "reaching the end wraps back to the start"
+  );
+
+  // ...and specifically NOT to the clock's origin. Seeking to 5.4 and playing
+  // past the end used to rewind to 5.4, which is instantly past the end again,
+  // so playback thrashed against the last frame instead of looping.
+  assertEqual(
+    advancePlayhead(5.4, 1.0, 0, 6),
+    { time: 0, wrapped: true },
+    "a wrap after a late seek rewinds to the start, not to the seek point"
+  );
+
+  // Solo preview of a clip that starts at 3s: its timeline both begins and
+  // rewinds to 3, never to 0.
+  assertEqual(
+    advancePlayhead(6.5, 1.0, 3, 7),
+    { time: 3, wrapped: true },
+    "a solo timeline wraps to the layer's own startAt"
+  );
+  assertEqual(
+    advancePlayhead(3, 2, 3, 7),
+    { time: 5, wrapped: false },
+    "a solo timeline advances normally inside its span"
+  );
+
+  // Landing exactly on the end counts as the end.
+  assertEqual(
+    advancePlayhead(5, 1, 0, 6),
+    { time: 0, wrapped: true },
+    "hitting the duration exactly wraps"
+  );
+
+  // A zero-length timeline (nothing set up yet) must not wrap-loop forever.
+  assertEqual(
+    advancePlayhead(0, 0.5, 0, 0),
+    { time: 0.5, wrapped: false },
+    "an empty timeline does not pin the playhead at zero"
+  );
+}
+
+// =============================================================
 // RESULTS
 // =============================================================
+rateLimitTests();
+tokenTests();
+videoPreviewTests();
+
 renderFontTests().then(apiKeyTests).then(ssrfTests).then(() => {
   console.log("\n================================================================");
   console.log(`  RESULTS: ${passed} passed, ${failed} failed`);

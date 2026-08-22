@@ -11,14 +11,37 @@ export function generateId(prefix: string = ""): string {
   return prefix ? `${prefix}_${raw}` : raw;
 }
 
+const TOKEN_CHARS =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/**
+ * Random token for session cookies and API keys.
+ *
+ * Rejection sampling, not `byte % 62`. 256 isn't a multiple of 62, so the
+ * modulo mapping hands the first 8 letters of the alphabet five byte values
+ * each while the other 54 get four — a ~25% bias on every character, which
+ * shaves real entropy off a value whose whole job is to be unguessable.
+ * Discarding the 8 bytes in the ragged tail (>= 248) makes the distribution
+ * exactly uniform, at the cost of re-drawing ~3% of the time.
+ */
 export function generateToken(length: number = 48): string {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const limit = 256 - (256 % TOKEN_CHARS.length); // 248
+  // getRandomValues refuses buffers over 65536 bytes, so cap each draw well
+  // under that. Every real caller asks for 32 or 48 characters and gets a
+  // single pass; the cap only matters for outsized requests.
+  const MAX_DRAW = 4096;
   let result = "";
-  const array = new Uint8Array(length);
-  crypto.getRandomValues(array);
-  for (let i = 0; i < length; i++) {
-    result += chars[array[i] % chars.length];
+  while (result.length < length) {
+    // Over-draw a little so the common case still needs just one call after a
+    // few rejections.
+    const want = Math.min(MAX_DRAW, length - result.length + 8);
+    const array = new Uint8Array(want);
+    crypto.getRandomValues(array);
+    for (const byte of array) {
+      if (byte >= limit) continue;
+      result += TOKEN_CHARS[byte % TOKEN_CHARS.length];
+      if (result.length === length) break;
+    }
   }
   return result;
 }

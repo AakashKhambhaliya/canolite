@@ -52,25 +52,16 @@ export async function GET(
       "Content-Type": MIME[ext] || "application/octet-stream",
       // Keys are unique per render/upload, so the bytes never change.
       "Cache-Control": "public, max-age=31536000, immutable",
-      // Never let the browser MIME-sniff user-supplied bytes into something
-      // executable.
-      "X-Content-Type-Options": "nosniff",
-      // NOTE: the renderer needs Access-Control-Allow-Origin on these files
-      // (see the /storage entry in next.config.mjs `headers()`). It is set
-      // there, not here: with STORAGE_DIR at its default the files live under
-      // public/ and are served by Next's STATIC handler, which never reaches
-      // this route — and setting it in both places would emit the header twice.
+      // NOTE: the security headers these bytes need — X-Content-Type-Options,
+      // the locked-down Content-Security-Policy that defuses SVG stored XSS,
+      // and the Access-Control-Allow-Origin the renderer relies on — are all
+      // declared on the /storage entry in next.config.mjs `headers()`, not
+      // here. With STORAGE_DIR at its default the files live under public/ and
+      // are served by Next's STATIC handler, which never reaches this route,
+      // so anything set only here protected just the STORAGE_DIR deploys.
+      // Declaring them there covers both paths with one rule; repeating them
+      // here would emit each header twice.
     };
-
-    // SVGs served inline from our own origin are a stored-XSS vector: a crafted
-    // <svg> can carry <script>/onload handlers that run in this origin's
-    // context. Neutralize them with a locked-down CSP + a sandbox that blocks
-    // scripts, so an <img src>/<object> still renders the drawing but never
-    // executes code. (Raster formats can't execute, so they're unaffected.)
-    if (ext === "svg") {
-      headers["Content-Security-Policy"] =
-        "default-src 'none'; style-src 'unsafe-inline'; sandbox";
-    }
 
     return new NextResponse(new Uint8Array(data), { status: 200, headers });
   } catch {

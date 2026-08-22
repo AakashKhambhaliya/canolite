@@ -7,6 +7,7 @@ import { extractFields } from "@/lib/render/apply-modifications";
 import { generateThumbnail } from "@/lib/render/thumbnail";
 import { deleteFile } from "@/lib/storage";
 import { isImage } from "@/lib/design/predicates";
+import { templateUpdateSchema } from "@/lib/validation";
 
 function designHasVideo(value: any): boolean {
   const objects = Array.isArray(value?.objects) ? value.objects : [];
@@ -80,8 +81,22 @@ export async function PUT(
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const body = await request.json();
-    const { name, width, height, designJson, outputDefaults, videoDefaults } = body;
+    // Same reasoning as the create route: an unbounded width/height persisted
+    // here becomes an out-of-memory failure in every later render.
+    const parsed = templateUpdateSchema.safeParse(await request.json());
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      return NextResponse.json(
+        {
+          error: issue
+            ? `${issue.path.join(".") || "body"}: ${issue.message}`
+            : "Invalid template",
+        },
+        { status: 400 }
+      );
+    }
+    const { name, width, height, designJson, outputDefaults, videoDefaults } =
+      parsed.data;
 
     const updateData: Record<string, any> = { updatedAt: new Date() };
     if (name !== undefined) updateData.name = name;

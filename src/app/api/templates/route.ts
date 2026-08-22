@@ -5,6 +5,7 @@ import { eq, and, desc } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { generateId } from "@/lib/utils";
 import { generateThumbnail } from "@/lib/render/thumbnail";
+import { templateCreateSchema } from "@/lib/validation";
 
 export async function GET() {
   try {
@@ -61,8 +62,22 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const body = await request.json();
-    const { name, width, height } = body;
+    // Validated, not destructured raw: width/height are a direct multiplier on
+    // render-time memory, so an out-of-range value here is a stored DoS on
+    // every later render of the template (see validation.ts).
+    const parsed = templateCreateSchema.safeParse(await request.json());
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      return NextResponse.json(
+        {
+          error: issue
+            ? `${issue.path.join(".") || "body"}: ${issue.message}`
+            : "Invalid template",
+        },
+        { status: 400 }
+      );
+    }
+    const { name, width, height } = parsed.data;
 
     const templateId = generateId("tmpl");
 

@@ -31,8 +31,56 @@ import {
   FileImage,
   Zap,
   Download,
+  Video,
 } from "lucide-react";
 import { copyToClipboard } from "@/lib/utils";
+
+/** How often to ask the server how a video render is getting on. */
+const POLL_INTERVAL_MS = 1500;
+/**
+ * Give up after this long. Comfortably beyond the server's own
+ * VIDEO_RENDER_TIMEOUT_MS (15 min default), so a job that dies server-side
+ * reports its own failure rather than being cut off here first.
+ */
+const POLL_TIMEOUT_MS = 20 * 60 * 1000;
+
+/**
+ * Follow an asynchronous render to completion.
+ *
+ * Video jobs are queued, not rendered inline — POST /api/render answers 202
+ * with a uid as soon as the job exists — so the finished file only shows up
+ * later, on the job row.
+ */
+async function pollRenderJob(
+  uid: string,
+  onProgress: (progress: number) => void
+): Promise<{ url: string; isVideo: boolean }> {
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  onProgress(0);
+
+  while (Date.now() < deadline) {
+    const res = await fetch(`/api/renders/${uid}`, { cache: "no-store" });
+    if (!res.ok) {
+      throw new Error("Lost track of the render job");
+    }
+    const job = await res.json();
+
+    if (job.status === "failed") {
+      throw new Error(job.error || "Render failed");
+    }
+    if (job.status === "done") {
+      const url = job.outputUrl || job.imageUrl;
+      if (!url) throw new Error("Render finished but produced no file");
+      onProgress(100);
+      return { url, isVideo: job.outputKind === "video" };
+    }
+
+    onProgress(job.progress ?? 0);
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+
+  throw new Error("Timed out waiting for the render to finish");
+}
 
 export function PlaygroundContent() {
   const searchParams = useSearchParams();
@@ -48,6 +96,17 @@ export function PlaygroundContent() {
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [imageSize, setImageSize] = useState<number | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
+  // MP4-only output settings. The image `quality` number means nothing to the
+  // encoder, which takes a CRF preset instead.
+  const [videoQuality, setVideoQuality] = useState("balanced");
+  const [fps, setFps] = useState(30);
+  const [duration, setDuration] = useState<number | "">("");
+  // A finished MP4 needs a <video>, not an <img>; and while it renders there is
+  // a percentage to show, because video jobs are asynchronous.
+  const [resultIsVideo, setResultIsVideo] = useState(false);
+  const [videoProgress, setVideoProgress] = useState<number | null>(null);
+
+  const isVideoFormat = format === "mp4";
 
   // Fetch templates
   const { data: templates } = useQuery({
@@ -91,6 +150,15 @@ export function PlaygroundContent() {
     setBaseUrl(window.location.origin);
   }, []);
 
+  // MP4 is only offered for templates that actually contain a video layer —
+  // the render rejects anything else with "Template does not contain video
+  // layers". Switching to such a template with MP4 still selected would leave
+  // the form in a state that can only fail, so fall back to PNG.
+  const templateHasVideo = !!templateData?.hasVideo;
+  useEffect(() => {
+    if (format === "mp4" && templateData && !templateHasVideo) setFormat("png");
+  }, [format, templateData, templateHasVideo]);
+
   // Generate mutation
   const generateMutation = useMutation({
     mutationFn: async () => {
@@ -118,17 +186,39 @@ export function PlaygroundContent() {
           format,
           quality,
           scale,
+          ...(isVideoFormat
+            ? {
+                videoQuality,
+                fps,
+                ...(duration !== "" ? { duration: Number(duration) } : {}),
+              }
+            : {}),
         }),
       });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to generate");
+        throw new Error(data.error || "Failed to generate");
       }
-      return res.json();
+
+      // Image renders come back finished. Video renders do not: the route
+      // queues the job and answers 202 with a uid and no URL, so the result
+      // has to be polled for. Treating that 202 as a finished render is why
+      // choosing MP4 here produced nothing at all.
+      if (res.status === 202 && data.uid) {
+        return pollRenderJob(data.uid, setVideoProgress);
+      }
+
+      // A synchronous render can still have failed — the route reports that in
+      // the body with a 200 — so it has to be checked rather than assumed.
+      if (data.status === "failed" || !data.image_url) {
+        throw new Error(data.error || "Render failed");
+      }
+      return { url: data.image_url, isVideo: false };
     },
-    onSuccess: (data) => {
-      const url = data.image_url || data.imageUrl;
+    onSuccess: ({ url, isVideo }) => {
       setGeneratedImage(url);
+      setResultIsVideo(isVideo);
+      setVideoProgress(null);
       setImageSize(null);
       // Fetch actual file size
       if (url) {
@@ -137,33 +227,46 @@ export function PlaygroundContent() {
           .then((blob) => setImageSize(blob.size))
           .catch(() => {});
       }
-      toast.success("Image generated!");
+      toast.success(isVideo ? "Video generated!" : "Image generated!");
     },
     onError: (err: Error) => {
-      toast.error(err.message || "Failed to generate image");
+      setVideoProgress(null);
+      toast.error(err.message || "Failed to generate");
     },
   });
 
   // Build the API request JSON for display
-  const apiRequest = {
-    template_id: selectedTemplate || "tmpl_example",
-    modifications: Object.entries(modifications)
-      .filter(([_, v]) => v)
-      .map(([name, value]) => {
-        const field = templateData?.fields?.find(
-          (f: any) => f.name === name
-        );
-        if (field?.type === "image") return { name, image_url: value };
-        if (field?.type === "shape") return { name, fill: value };
-        return { name, text: value };
-      }),
-    format,
-    quality,
-    scale,
-  };
+  const apiModifications = Object.entries(modifications)
+    .filter(([_, v]) => v)
+    .map(([name, value]) => {
+      const field = templateData?.fields?.find((f: any) => f.name === name);
+      if (field?.type === "image") return { name, image_url: value };
+      if (field?.type === "shape") return { name, fill: value };
+      return { name, text: value };
+    });
 
+  // MP4 is a different endpoint with a different body — /v1/images rejects
+  // format "mp4" outright and points callers at /v1/videos, so showing the
+  // image request for a video render would hand the user a failing snippet.
+  const apiRequest = isVideoFormat
+    ? {
+        template_id: selectedTemplate || "tmpl_example",
+        modifications: apiModifications,
+        quality: videoQuality,
+        fps,
+        ...(duration !== "" ? { duration: Number(duration) } : {}),
+      }
+    : {
+        template_id: selectedTemplate || "tmpl_example",
+        modifications: apiModifications,
+        format,
+        quality,
+        scale,
+      };
 
-  const curlCommand = `curl -X POST ${baseUrl}/v1/images \\
+  const apiEndpoint = isVideoFormat ? "/v1/videos" : "/v1/images";
+
+  const curlCommand = `curl -X POST ${baseUrl}${apiEndpoint} \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(apiRequest, null, 2)}'`;
@@ -299,19 +402,41 @@ export function PlaygroundContent() {
                       <SelectItem value="png">PNG</SelectItem>
                       <SelectItem value="jpg">JPG</SelectItem>
                       <SelectItem value="webp">WebP</SelectItem>
+                      {/* Only for templates with a video layer — the render
+                          refuses MP4 for anything else. Matches the editor's
+                          export dialog, which gates it the same way. */}
+                      {templateHasVideo && (
+                        <SelectItem value="mp4">MP4</SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">Quality</Label>
-                  <Input
-                    type="number"
-                    value={quality}
-                    onChange={(e) => setQuality(Number(e.target.value))}
-                    min={1}
-                    max={100}
-                    className="h-9"
-                  />
+                  {isVideoFormat ? (
+                    // The encoder takes a CRF preset, not the 1-100 number the
+                    // image formats use — passing that number through would be
+                    // read as a CRF and quietly wreck the output.
+                    <Select value={videoQuality} onValueChange={setVideoQuality}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="high">High</SelectItem>
+                        <SelectItem value="balanced">Balanced</SelectItem>
+                        <SelectItem value="small">Small</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      type="number"
+                      value={quality}
+                      onChange={(e) => setQuality(Number(e.target.value))}
+                      min={1}
+                      max={100}
+                      className="h-9"
+                    />
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">Scale</Label>
@@ -330,7 +455,40 @@ export function PlaygroundContent() {
                   </Select>
                 </div>
               </div>
-              {templateData && (
+
+              {isVideoFormat && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Frame rate</Label>
+                    <Input
+                      type="number"
+                      value={fps}
+                      onChange={(e) => setFps(Number(e.target.value))}
+                      min={1}
+                      max={60}
+                      className="h-9"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Duration (s)</Label>
+                    <Input
+                      type="number"
+                      value={duration}
+                      onChange={(e) =>
+                        setDuration(e.target.value === "" ? "" : Number(e.target.value))
+                      }
+                      min={1}
+                      max={120}
+                      placeholder="Auto"
+                      className="h-9"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Deliberately image-only: this estimate is bytes-per-pixel of a
+                  single still, which says nothing useful about an encoded MP4. */}
+              {templateData && !isVideoFormat && (
                 <p className="text-xs text-muted-foreground pt-3">
                   Est. size:{" "}
                   {(() => {
@@ -377,8 +535,28 @@ export function PlaygroundContent() {
             ) : (
               <Sparkles className="mr-2 h-5 w-5" />
             )}
-            Generate Image
+            {generateMutation.isPending && videoProgress !== null
+              ? `Rendering video… ${videoProgress}%`
+              : isVideoFormat
+              ? "Generate Video"
+              : "Generate Image"}
           </Button>
+
+          {/* Video renders take far longer than a still, so show the job's own
+              progress rather than leaving a spinner sitting there for minutes. */}
+          {generateMutation.isPending && videoProgress !== null && (
+            <div className="space-y-1.5">
+              <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full bg-blue-600 transition-all"
+                  style={{ width: `${videoProgress}%` }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground text-center">
+                Encoding frames — this can take a few minutes.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Right: Preview & API */}
@@ -391,16 +569,32 @@ export function PlaygroundContent() {
             <CardContent>
               <div className="aspect-[4/3] bg-muted rounded-lg flex items-center justify-center overflow-hidden">
                 {generatedImage ? (
-                  <img
-                    src={generatedImage}
-                    alt="Generated"
-                    className="w-full h-full object-contain"
-                  />
+                  // An MP4 in an <img> renders nothing at all, so the result
+                  // has to be told apart from a still.
+                  resultIsVideo ? (
+                    <video
+                      src={generatedImage}
+                      controls
+                      loop
+                      playsInline
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <img
+                      src={generatedImage}
+                      alt="Generated"
+                      className="w-full h-full object-contain"
+                    />
+                  )
                 ) : (
                   <div className="text-center">
-                    <FileImage className="h-12 w-12 text-muted-foreground mx-auto mb-3" />
+                    {isVideoFormat ? (
+                      <Video className="h-12 w-12 text-muted-foreground mx-auto mb-3" />
+                    ) : (
+                      <FileImage className="h-12 w-12 text-muted-foreground mx-auto mb-3" />
+                    )}
                     <p className="text-sm text-muted-foreground">
-                      Generated image will appear here
+                      Generated {isVideoFormat ? "video" : "image"} will appear here
                     </p>
                   </div>
                 )}
@@ -441,7 +635,7 @@ export function PlaygroundContent() {
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement("a");
                           a.href = url;
-                          a.download = `generated.${format}`;
+                          a.download = `generated.${resultIsVideo ? "mp4" : format}`;
                           document.body.appendChild(a);
                           a.click();
                           a.remove();
