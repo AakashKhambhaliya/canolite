@@ -60,8 +60,17 @@ export async function register() {
       console.error("[instance] consistency check failed:", e)
     );
 
+    // Any render that was in flight when the previous process died is gone —
+    // it lived in that process's memory. Fail those rows now, or they sit at
+    // "processing" forever and every caller polling one waits indefinitely.
+    const { failOrphanedRenders, cleanupScheduled } = await import(
+      "@/lib/render/cleanup"
+    );
+    await failOrphanedRenders().catch((e) =>
+      console.error("[render] Could not reconcile interrupted renders:", e)
+    );
+
     // Run cleanup on boot + every hour, honoring each project's retention.
-    const { cleanupScheduled } = await import("@/lib/render/cleanup");
     cleanupScheduled().catch(() => {}); // don't block boot
     setInterval(() => {
       cleanupScheduled().catch((e) =>

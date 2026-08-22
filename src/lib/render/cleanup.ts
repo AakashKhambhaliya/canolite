@@ -11,6 +11,59 @@ import { deleteFile } from "@/lib/storage";
 
 const DEFAULT_RETENTION_HOURS = 24;
 
+/**
+ * Fail any render left mid-flight by a previous process.
+ *
+ * Renders run IN-PROCESS: the job row is the only durable record of one, while
+ * the extracted frames, the Chromium page and the ffmpeg child all live in this
+ * process's memory and scratch space. A restart — redeploy, crash, OOM kill —
+ * therefore abandons whatever was rendering, with nothing left to resume from.
+ *
+ * Nothing used to reconcile those rows, and none of the other mechanisms reach
+ * them: the retention sweep only removes jobs that have a `completedAt`, and
+ * the render timeout died with the process that was enforcing it. So the row
+ * sat at `processing` — showing the 1% written when the job started, before any
+ * real progress is reported — indefinitely, and a caller polling for the result
+ * waited on a render that no longer existed anywhere but the database.
+ *
+ * Marking them failed at boot is the honest outcome: the work is genuinely gone
+ * and the caller can retry.
+ *
+ * This assumes a single app instance, which is the design (embedded PostgreSQL,
+ * in-process rendering) — "processing" can only mean "owned by the process that
+ * just died". Running several replicas against one database would need this
+ * scoped per instance instead.
+ *
+ * Deliberately does NOT touch `queued`: with an external BullMQ worker those
+ * are still claimable, and in the in-process path a job is only queued for the
+ * instant before rendering starts.
+ */
+export async function failOrphanedRenders(): Promise<number> {
+  const orphans = await db
+    .select({ uid: renderJobs.uid })
+    .from(renderJobs)
+    .where(eq(renderJobs.status, "processing"));
+
+  if (orphans.length === 0) return 0;
+
+  await db
+    .update(renderJobs)
+    .set({
+      status: "failed",
+      errorMessage:
+        "The server restarted while this render was in progress, so it was " +
+        "abandoned. Submit it again.",
+      completedAt: new Date(),
+    })
+    .where(eq(renderJobs.status, "processing"));
+
+  console.warn(
+    `[render] Marked ${orphans.length} interrupted render(s) as failed: ` +
+      orphans.map((o) => o.uid).join(", ")
+  );
+  return orphans.length;
+}
+
 /** Rows eligible for cleanup: completed, and older than the retention cutoff. */
 function cleanableWhere(retentionHours: number, projectId?: string) {
   const cutoff = new Date(Date.now() - retentionHours * 60 * 60 * 1000);

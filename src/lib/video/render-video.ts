@@ -10,6 +10,16 @@ import { buildTimeline, sourceTimeForFrame, type Timeline } from "./timeline";
 import { decodeLayerFrames, type DecodedLayer } from "./decode";
 import { startMp4Encoder } from "./encode";
 
+/**
+ * Progress budget for the preparation phase, before a single frame is encoded.
+ * Frame decoding runs to DECODE_PROGRESS_CEILING, loading the design into
+ * headless Chromium takes it to PREP_PROGRESS_CEILING, and encoding spans the
+ * remainder. The split is a rough reflection of where the time actually goes;
+ * its real job is to prove the render is alive.
+ */
+const DECODE_PROGRESS_CEILING = 12;
+const PREP_PROGRESS_CEILING = 15;
+
 const VIDEO_RENDER_TIMEOUT_MS = config.VIDEO_RENDER_TIMEOUT_MS;
 const VIDEO_CONCURRENCY = Math.max(1, config.VIDEO_CONCURRENCY);
 
@@ -128,9 +138,18 @@ async function renderVideoToBufferInner(opts: RenderVideoOptions): Promise<Rende
     await fs.mkdir(tmpDir, { recursive: true });
 
     const { designJson: renderJson, customFonts } = await prepareDesignForRender(opts.designJson, opts.projectId);
+    // Everything up to the first encoded frame used to report nothing, leaving
+    // the job pinned at the 1% written when it was created. That covers image
+    // inlining, a full ffmpeg frame extraction per layer (minutes on a large
+    // clip) and a cold Chromium launch — so a perfectly healthy render looked
+    // indistinguishable from a wedged one. Spread the preparation over the
+    // first PREP_PROGRESS_CEILING percent so the bar always moves.
     const decoded: DecodedLayer[] = [];
-    for (const layer of timeline.layers) {
+    for (const [index, layer] of timeline.layers.entries()) {
       decoded.push(await decodeLayerFrames({ layer, fps: timeline.fps, tmpDir, storageTmpKey, outputScale }));
+      await opts.onProgress?.(
+        Math.round(((index + 1) / timeline.layers.length) * DECODE_PROGRESS_CEILING)
+      );
     }
 
     const families = collectFamilies(renderJson);
@@ -193,6 +212,9 @@ async function renderVideoToBufferInner(opts: RenderVideoOptions): Promise<Rende
       { designJson: renderJson, width: opts.width, height: opts.height, background: opts.background || renderJson?.background, families }
     );
 
+    // Design loaded in Chromium — the last silent step before encoding starts.
+    await opts.onProgress?.(PREP_PROGRESS_CEILING);
+
     encoder = startMp4Encoder({
       outPath,
       width: evenWidth,
@@ -249,7 +271,14 @@ async function renderVideoToBufferInner(opts: RenderVideoOptions): Promise<Rende
       if (!firstPng) firstPng = png;
       await writeWithBackpressure(encoder.stdin, png);
       if (frameIdx % 10 === 0 || frameIdx === timeline.frameCount - 1) {
-        const progress = Math.min(99, Math.round(((frameIdx + 1) / timeline.frameCount) * 95));
+        // Spans PREP_PROGRESS_CEILING..99 rather than 0..95, so encoding picks
+        // up where preparation left off instead of jumping backwards to ~0 on
+        // the first frame.
+        const encoded = (frameIdx + 1) / timeline.frameCount;
+        const progress = Math.min(
+          99,
+          PREP_PROGRESS_CEILING + Math.round(encoded * (99 - PREP_PROGRESS_CEILING))
+        );
         await opts.onProgress?.(progress);
       }
     }
