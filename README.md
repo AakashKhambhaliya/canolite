@@ -152,9 +152,14 @@ Render pipeline (synchronous, in-process)
         │
         ├── Image (png/jpg/webp): one Chromium paint → Sharp → store
         │
-        ├── Video (mp4): ffmpeg decodes each source clip to frames →
-        │     Chromium paints one canvas per output frame →
-        │     ffmpeg encodes H.264 + audio → store (job reports progress)
+        ├── Video (mp4): fast path when every video layer is "simple"
+        │     (axis-aligned, constant opacity): Chromium paints the static
+        │     layers once, one ffmpeg filter graph overlays the video sources
+        │     and encodes H.264 + audio — no per-frame browser work.
+        │     Anything else (rotations, clips, groups, …) uses the legacy
+        │     loop: ffmpeg decodes each clip to frames, N Chromium pages
+        │     paint frames in parallel, an ordered writer feeds the encoder.
+        │     See docs/video-rendering.md.
         │
         ├── Database: embedded PostgreSQL (default) or external PostgreSQL
         └── Storage:  local filesystem (persist with a volume)
@@ -340,8 +345,12 @@ If `DATABASE_URL` is unset, Canolite starts embedded PostgreSQL on `127.0.0.1` u
 | `VIDEO_PROBE_TIMEOUT_MS` / `VIDEO_POSTER_TIMEOUT_MS` | `60000` / `60000` | Timeout budget for upload video probing and poster extraction |
 | `VIDEO_DEFAULT_FPS` / `VIDEO_MAX_FPS` | `30` / `60` | Default and maximum MP4 render frame rate |
 | `VIDEO_MAX_OUTPUT_SEC` | `120` | Maximum MP4 output duration |
-| `VIDEO_DECODE_TIMEOUT_MS` | `300000` | Timeout budget for decoding a source clip to frames |
+| `VIDEO_DECODE_TIMEOUT_MS` | `300000` | Timeout budget for decoding a source clip to frames (legacy path) |
 | `VIDEO_CONCURRENCY` | `1` | Maximum in-process video renders at once |
+| `VIDEO_FORCE_LEGACY_RENDERER` | unset | Set `1` to render every video through the Chromium loop (debugging; see docs/video-rendering.md) |
+| `VIDEO_FRAME_WORKERS` | CPU count | Parallel Chromium pages that paint frames on the legacy video path |
+| `VIDEO_FFMPEG_LOOP_MEMORY_MB` | `512` | Loop-cache memory budget; looping video layers above it fall back to the legacy path |
+| `VIDEO_ENCODER` | `libx264` | Video codec: `libx264`, `h264_nvenc`, `h264_vaapi`, `h264_videotoolbox`. Hardware encoders need a system ffmpeg via `FFMPEG_PATH` (`ffmpeg-static` is CPU-only) |
 
 Sessions are random tokens stored in the database, so there is no signing secret
 to configure. `AUTH_SECRET` and `NEXTAUTH_URL` still appear in `.env.example`

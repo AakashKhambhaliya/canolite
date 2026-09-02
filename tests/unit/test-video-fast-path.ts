@@ -446,7 +446,7 @@ console.log("\n5. renderer choice\n");
   );
   const rotated = chooseRenderer({ objects: [videoObject({ angle: 10 })] }, { layers, fps: 30, outputScale: 1, forceLegacy: false });
   assertEqual(rotated.renderer, "chromium", "a rotated video layer takes the legacy path");
-  assert(rotated.reason?.includes("angle"), "the logged reason mentions the offending property");
+  assert(Boolean(rotated.reason?.includes("angle")), "the logged reason mentions the offending property");
 
   assertEqual(
     chooseRenderer({ objects: [videoObject()] }, { layers, fps: 30, outputScale: 1, forceLegacy: true }).renderer,
@@ -464,7 +464,7 @@ console.log("\n5. renderer choice\n");
     { layers: [bigLoop], fps: 30, outputScale: 1, forceLegacy: false }
   );
   assertEqual(bigLoopChoice.renderer, "chromium", "an oversized loop cache takes the legacy path");
-  assert(bigLoopChoice.reason?.includes("VIDEO_FFMPEG_LOOP_MEMORY_MB"), "the loop-budget reason is logged");
+  assert(Boolean(bigLoopChoice.reason?.includes("VIDEO_FFMPEG_LOOP_MEMORY_MB")), "the loop-budget reason is logged");
 }
 
 console.log("\n================================================================");
