@@ -5,6 +5,11 @@ import { eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { settingsSchema } from "@/lib/validation";
 import { isUrlSafe } from "@/lib/ssrf";
+import {
+  normalizeFormat,
+  projectDefaultsLayer,
+  resolveOutputSettings,
+} from "@/lib/output-settings";
 
 export async function GET() {
   try {
@@ -19,11 +24,17 @@ export async function GET() {
       .where(eq(projects.id, user.projectId))
       .limit(1);
 
+    // The output block is resolved through the shared helper so the values the
+    // Settings form shows are literally the ones the renderer will use.
+    const output = resolveOutputSettings(projectDefaultsLayer(project));
+
     return NextResponse.json({
       ...project,
-      defaultFormat: project?.defaultFormat || "png",
-      defaultQuality: project?.defaultQuality ?? 90,
-      defaultScale: project?.defaultScale ?? 1,
+      defaultFormat: output.format,
+      defaultQuality: output.quality,
+      defaultScale: output.scale,
+      defaultFps: output.fps,
+      defaultVideoQuality: output.videoQuality,
       retentionHours: project?.retentionHours ?? 24,
     });
   } catch (error) {
@@ -54,6 +65,8 @@ export async function PUT(request: Request) {
       defaultFormat,
       defaultQuality,
       defaultScale,
+      defaultFps,
+      defaultVideoQuality,
       retentionHours,
     } = parsed.data;
 
@@ -75,9 +88,14 @@ export async function PUT(request: Request) {
       updatedAt: new Date(),
     };
 
-    if (defaultFormat !== undefined) updateData.defaultFormat = defaultFormat;
+    // "jpeg" is stored as "jpg" so every reader sees one spelling.
+    if (defaultFormat !== undefined)
+      updateData.defaultFormat = normalizeFormat(defaultFormat) ?? "png";
     if (defaultQuality !== undefined) updateData.defaultQuality = defaultQuality;
     if (defaultScale !== undefined) updateData.defaultScale = defaultScale;
+    if (defaultFps !== undefined) updateData.defaultFps = defaultFps;
+    if (defaultVideoQuality !== undefined)
+      updateData.defaultVideoQuality = defaultVideoQuality;
     if (retentionHours !== undefined) updateData.retentionHours = retentionHours;
 
     await db

@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     if (!parsed.success) {
       return withCors(NextResponse.json({ error: "Validation error", details: parsed.error.issues.map((i) => ({ field: i.path.join("."), message: i.message })) }, { status: 400 }));
     }
-    const { template_id, modifications, fps, duration, quality, webhook_url } = parsed.data;
+    const { template_id, modifications, fps, duration, quality, scale, webhook_url } = parsed.data;
     if (webhook_url && !(await isUrlSafe(webhook_url))) {
       return withCors(NextResponse.json({ error: "webhook_url must be a public http(s) URL" }, { status: 400 }));
     }
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
       projectId: auth.projectId,
       templateId: template_id,
       modifications,
-      output: { fps, durationSec: duration, quality },
+      output: { fps, durationSec: duration, quality, scale },
       webhookUrl: webhook_url,
     });
     if (!created) return withCors(NextResponse.json({ error: "Template not found" }, { status: 404 }));

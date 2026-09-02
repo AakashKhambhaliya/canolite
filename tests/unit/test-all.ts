@@ -9,6 +9,22 @@ import { buildTimeline, collectVideoLayers, sourceTimeForFrame } from "../../src
 import { walkDesignObjects } from "../../src/lib/design/walk";
 import { isImage, isShape, isText } from "../../src/lib/design/predicates";
 import { resolveOutput } from "../../src/lib/render/create-job";
+import {
+  crfToVideoQuality,
+  estimateOutputBytes,
+  normalizeFormat,
+  projectDefaultsLayer,
+  resolveOutputSettings,
+  videoQualityToCrf,
+} from "../../src/lib/output-settings";
+import {
+  buildRenderTimeStats,
+  estimateBatchMs,
+  estimateRenderMs,
+  formatEta,
+  formatRenderTime,
+  remainingMs,
+} from "../../src/lib/render-time";
 import { storageFilePath } from "../../src/lib/storage";
 import { isUrlSafe } from "../../src/lib/ssrf";
 import { selfStoragePath } from "../../src/lib/render/inline-images";
@@ -1129,8 +1145,182 @@ function videoPreviewTests() {
 }
 
 // =============================================================
+// UNIVERSAL OUTPUT SETTINGS
+// =============================================================
+function outputSettingsTests() {
+  console.log("\n--- Output settings ---");
+
+  assertEqual(
+    resolveOutputSettings(
+      { format: "webp", quality: 60, scale: 1, fps: 24 },
+      { format: "jpg", quality: 80, scale: 2 },
+      { quality: 70 }
+    ),
+    {
+      format: "jpg",
+      quality: 70,
+      scale: 2,
+      fps: 24,
+      videoQuality: "balanced",
+      durationSec: null,
+    },
+    "later layers win per key: project → template → request"
+  );
+
+  // Blank fields mean "inherit", not "zero" — this is what makes an empty
+  // input in the editor keep following the global default.
+  assertEqual(
+    resolveOutputSettings({ format: "webp", quality: 60 }, { format: "", quality: "", scale: null }),
+    {
+      format: "webp",
+      quality: 60,
+      scale: 1,
+      fps: 30,
+      videoQuality: "balanced",
+      durationSec: null,
+    },
+    "empty strings and nulls inherit instead of overriding"
+  );
+
+  assertEqual(normalizeFormat("JPEG"), "jpg", "jpeg normalizes to jpg");
+  assertEqual(normalizeFormat("bmp"), undefined, "unknown formats are dropped");
+  assertEqual(
+    resolveOutputSettings({ scale: 99, quality: 500, fps: 999 }).scale,
+    4,
+    "out-of-range scale is clamped to the shared maximum"
+  );
+  assertEqual(
+    resolveOutputSettings({ quality: 500 }).quality,
+    100,
+    "out-of-range quality is clamped"
+  );
+
+  assertEqual(
+    crfToVideoQuality(videoQualityToCrf("high")),
+    "high",
+    "video quality survives a round-trip through CRF"
+  );
+
+  assertEqual(
+    projectDefaultsLayer({
+      defaultFormat: "webp",
+      defaultQuality: 70,
+      defaultScale: 2,
+      defaultFps: 24,
+      defaultVideoQuality: "small",
+    }),
+    {
+      format: "webp",
+      quality: 70,
+      scale: 2,
+      fps: 24,
+      videoQuality: "small",
+    },
+    "a project row maps onto a settings layer"
+  );
+
+  // Bigger scale means more pixels means a bigger file — the estimate the
+  // editor and Playground both show has to move with it.
+  const small = estimateOutputBytes({
+    width: 1080,
+    height: 1350,
+    scale: 1,
+    format: "png",
+    quality: 90,
+  });
+  const large = estimateOutputBytes({
+    width: 1080,
+    height: 1350,
+    scale: 2,
+    format: "png",
+    quality: 90,
+  });
+  assert(large === small * 4, "size estimate scales with pixel count");
+}
+
+// =============================================================
+// RENDER TIME ESTIMATES
+// =============================================================
+function renderTimeTests() {
+  console.log("\n--- Render time ---");
+
+  const stats = buildRenderTimeStats(
+    [
+      { kind: "image", templateId: "tmpl_a", durationMs: 1000, megapixels: 1, frames: null },
+      { kind: "image", templateId: "tmpl_a", durationMs: 2000, megapixels: 2, frames: null },
+      { kind: "image", templateId: "tmpl_a", durationMs: 3000, megapixels: 3, frames: null },
+      { kind: "video", templateId: "tmpl_b", durationMs: 30_000, megapixels: 2, frames: 300 },
+    ],
+    0,
+    { image: 3, video: 1 }
+  );
+
+  assertEqual(stats.image?.samples, 3, "image bucket counts its samples");
+  assertEqual(stats.image?.msPerMegapixel, 1000, "median ms per megapixel");
+  assertEqual(stats.video?.msPerFrame, 100, "median ms per encoded frame");
+
+  // 4 megapixels of output at 1000 ms/MP.
+  const imageEstimate = estimateRenderMs(stats, {
+    kind: "image",
+    templateId: "tmpl_a",
+    width: 1000,
+    height: 1000,
+    scale: 2,
+  });
+  assertEqual(imageEstimate.ms, 4000, "image estimate scales with output megapixels");
+  assertEqual(imageEstimate.basis, "template", "per-template history is preferred");
+
+  // 60 fps x 10s = 600 frames at 100 ms/frame. The video bucket has a single
+  // sample, so it is used at project level rather than per template.
+  const videoEstimate = estimateRenderMs(stats, {
+    kind: "video",
+    templateId: "tmpl_b",
+    width: 1000,
+    height: 1000,
+    scale: 1,
+    fps: 60,
+    durationSec: 10,
+  });
+  assertEqual(videoEstimate.ms, 60_000, "video estimate scales with frame count");
+  assertEqual(videoEstimate.basis, "project", "a thin per-template bucket falls back to the project");
+
+  const cold = estimateRenderMs(null, { kind: "image", width: 1000, height: 1000, scale: 1 });
+  assert(cold.samples === 0 && cold.basis === "estimate", "no history gives a labelled cold-start guess");
+  assert(cold.ms > 0, "the cold-start guess is still a usable number");
+
+  // Once a video job reports real progress, its own pace beats the average.
+  assertEqual(
+    remainingMs({ elapsedMs: 10_000, progress: 50, estimateMs: 999_999 }),
+    10_000,
+    "in-flight progress drives the remaining time"
+  );
+  assertEqual(
+    remainingMs({ elapsedMs: 1000, progress: 0, estimateMs: 5000 }),
+    4000,
+    "with no progress reported the estimate drives it"
+  );
+  assertEqual(
+    remainingMs({ elapsedMs: 9000, progress: null, estimateMs: 5000 }),
+    0,
+    "an overrunning render never reports negative time left"
+  );
+
+  // A batch runs `concurrency` at a time, so it is not count x per-render.
+  assertEqual(estimateBatchMs(1000, 10, 3), 4000, "batch time accounts for render concurrency");
+  assertEqual(estimateBatchMs(1000, 1, 3), 1000, "a single render is one wave");
+
+  assertEqual(formatRenderTime(573), "573ms", "sub-second times keep milliseconds");
+  assertEqual(formatRenderTime(4200), "4.2s", "seconds get one decimal");
+  assertEqual(formatRenderTime(125_000), "2m 05s", "minutes are padded");
+  assertEqual(formatEta(3400), "~3s", "an ETA is rounded to whole seconds");
+  assertEqual(formatEta(400), "<1s", "a sub-second ETA is not rounded away to zero");
+}
+
+// =============================================================
 // RESULTS
 // =============================================================
+outputSettingsTests();
+renderTimeTests();
 rateLimitTests();
 tokenTests();
 videoPreviewTests();

@@ -1,9 +1,9 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "next/navigation";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,8 +32,27 @@ import {
   Zap,
   Download,
   Video,
+  Timer,
 } from "lucide-react";
 import { copyToClipboard } from "@/lib/utils";
+import {
+  OutputSettingsFields,
+  type OutputSettingsValue,
+} from "@/components/output-settings-fields";
+import {
+  estimateOutputSizeLabel,
+  resolveOutputSettings,
+  type PartialOutputSettings,
+} from "@/lib/output-settings";
+import { useOutputDefaults } from "@/hooks/use-output-settings";
+import { useRenderStats } from "@/hooks/use-render-stats";
+import {
+  describeEstimate,
+  estimateRenderMs,
+  formatEta,
+  formatRenderTime,
+  remainingMs,
+} from "@/lib/render-time";
 
 /** How often to ask the server how a video render is getting on. */
 const POLL_INTERVAL_MS = 1500;
@@ -83,6 +102,7 @@ async function pollRenderJob(
 }
 
 export function PlaygroundContent() {
+  const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const initialTemplate = searchParams.get("template") || "";
 
@@ -90,23 +110,25 @@ export function PlaygroundContent() {
   const [modifications, setModifications] = useState<Record<string, string>>(
     {}
   );
-  const [format, setFormat] = useState("png");
-  const [quality, setQuality] = useState(90);
-  const [scale, setScale] = useState(1);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [imageSize, setImageSize] = useState<number | null>(null);
   const [baseUrl, setBaseUrl] = useState("");
-  // MP4-only output settings. The image `quality` number means nothing to the
-  // encoder, which takes a CRF preset instead.
-  const [videoQuality, setVideoQuality] = useState("balanced");
-  const [fps, setFps] = useState(30);
-  const [duration, setDuration] = useState<number | "">("");
   // A finished MP4 needs a <video>, not an <img>; and while it renders there is
   // a percentage to show, because video jobs are asynchronous.
   const [resultIsVideo, setResultIsVideo] = useState(false);
   const [videoProgress, setVideoProgress] = useState<number | null>(null);
 
-  const isVideoFormat = format === "mp4";
+  /**
+   * Only what the user has explicitly changed on this screen.
+   *
+   * The Playground used to keep its own hardcoded png/90/1x, ignoring both the
+   * project defaults and the template's — so the same template produced a
+   * different file here than through the API. Now the fields show the resolved
+   * settings (project → template → these overrides) and an edit records an
+   * override for this render only.
+   */
+  const [overrides, setOverrides] = useState<OutputSettingsValue>({});
+  const { defaults } = useOutputDefaults();
 
   // Fetch templates
   const { data: templates } = useQuery({
@@ -150,14 +172,56 @@ export function PlaygroundContent() {
     setBaseUrl(window.location.origin);
   }, []);
 
+  // The settings this render will actually use: project defaults, then the
+  // template's own outputDefaults, then anything changed on this screen —
+  // exactly the chain the server applies (lib/output-settings.ts).
+  const output = useMemo(
+    () =>
+      resolveOutputSettings(
+        defaults,
+        (templateData?.outputDefaults as PartialOutputSettings) || {},
+        {
+          ...(templateData?.videoDefaults?.fps
+            ? { fps: templateData.videoDefaults.fps }
+            : {}),
+          ...(templateData?.videoDefaults?.durationSec
+            ? { durationSec: templateData.videoDefaults.durationSec }
+            : {}),
+        },
+        overrides as PartialOutputSettings
+      ),
+    [defaults, templateData, overrides]
+  );
+
+  const format = output.format;
+  const isVideoFormat = format === "mp4";
+
   // MP4 is only offered for templates that actually contain a video layer —
   // the render rejects anything else with "Template does not contain video
   // layers". Switching to such a template with MP4 still selected would leave
   // the form in a state that can only fail, so fall back to PNG.
   const templateHasVideo = !!templateData?.hasVideo;
   useEffect(() => {
-    if (format === "mp4" && templateData && !templateHasVideo) setFormat("png");
+    if (format === "mp4" && templateData && !templateHasVideo) {
+      setOverrides((prev) => ({ ...prev, format: "png" }));
+    }
   }, [format, templateData, templateHasVideo]);
+
+  // ---- Render time ---------------------------------------------------------
+  // Estimated before the render, counted up during it, reported after it.
+  const { data: renderStats } = useRenderStats();
+  const estimate = estimateRenderMs(renderStats, {
+    kind: isVideoFormat ? "video" : "image",
+    templateId: selectedTemplate || null,
+    width: templateData?.width,
+    height: templateData?.height,
+    scale: output.scale,
+    fps: output.fps,
+    durationSec: output.durationSec,
+  });
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [lastRenderMs, setLastRenderMs] = useState<number | null>(null);
+  const startedAtRef = useRef<number | null>(null);
 
   // Generate mutation
   const generateMutation = useMutation({
@@ -183,14 +247,16 @@ export function PlaygroundContent() {
         body: JSON.stringify({
           template_id: selectedTemplate,
           modifications: modArray,
-          format,
-          quality,
-          scale,
+          format: output.format,
+          quality: output.quality,
+          scale: output.scale,
           ...(isVideoFormat
             ? {
-                videoQuality,
-                fps,
-                ...(duration !== "" ? { duration: Number(duration) } : {}),
+                videoQuality: output.videoQuality,
+                fps: output.fps,
+                ...(output.durationSec
+                  ? { duration: output.durationSec }
+                  : {}),
               }
             : {}),
         }),
@@ -215,7 +281,16 @@ export function PlaygroundContent() {
       }
       return { url: data.image_url, isVideo: false };
     },
+    onMutate: () => {
+      startedAtRef.current = Date.now();
+      setElapsedMs(0);
+      setLastRenderMs(null);
+    },
     onSuccess: ({ url, isVideo }) => {
+      const took = startedAtRef.current
+        ? Date.now() - startedAtRef.current
+        : null;
+      setLastRenderMs(took);
       setGeneratedImage(url);
       setResultIsVideo(isVideo);
       setVideoProgress(null);
@@ -227,13 +302,29 @@ export function PlaygroundContent() {
           .then((blob) => setImageSize(blob.size))
           .catch(() => {});
       }
-      toast.success(isVideo ? "Video generated!" : "Image generated!");
+      // This render is now part of the history the estimates are built from.
+      queryClient.invalidateQueries({ queryKey: ["render-stats"] });
+      toast.success(
+        `${isVideo ? "Video" : "Image"} generated${
+          took ? ` in ${formatRenderTime(took)}` : ""
+        }`
+      );
     },
     onError: (err: Error) => {
       setVideoProgress(null);
+      startedAtRef.current = null;
       toast.error(err.message || "Failed to generate");
     },
   });
+
+  // Tick the elapsed-time readout while a render is in flight.
+  useEffect(() => {
+    if (!generateMutation.isPending) return;
+    const id = setInterval(() => {
+      if (startedAtRef.current) setElapsedMs(Date.now() - startedAtRef.current);
+    }, 200);
+    return () => clearInterval(id);
+  }, [generateMutation.isPending]);
 
   // Build the API request JSON for display
   const apiModifications = Object.entries(modifications)
@@ -252,16 +343,17 @@ export function PlaygroundContent() {
     ? {
         template_id: selectedTemplate || "tmpl_example",
         modifications: apiModifications,
-        quality: videoQuality,
-        fps,
-        ...(duration !== "" ? { duration: Number(duration) } : {}),
+        quality: output.videoQuality,
+        fps: output.fps,
+        scale: output.scale,
+        ...(output.durationSec ? { duration: output.durationSec } : {}),
       }
     : {
         template_id: selectedTemplate || "tmpl_example",
         modifications: apiModifications,
-        format,
-        quality,
-        scale,
+        format: output.format,
+        quality: output.quality,
+        scale: output.scale,
       };
 
   const apiEndpoint = isVideoFormat ? "/v1/videos" : "/v1/images";
@@ -385,139 +477,68 @@ export function PlaygroundContent() {
             </Card>
           )}
 
-          {/* Output settings */}
+          {/* Output settings — the same fields, options and precedence as the
+              editor and the Settings screen (components/output-settings-fields). */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Output Settings</CardTitle>
+              <CardDescription>
+                Starts from your global defaults
+                {templateData?.outputDefaults
+                  ? " and this template's overrides"
+                  : ""}
+                . Changes here apply to this render only.
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-3 gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Format</Label>
-                  <Select value={format} onValueChange={setFormat}>
-                    <SelectTrigger className="h-9">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="png">PNG</SelectItem>
-                      <SelectItem value="jpg">JPG</SelectItem>
-                      <SelectItem value="webp">WebP</SelectItem>
-                      {/* Only for templates with a video layer — the render
-                          refuses MP4 for anything else. Matches the editor's
-                          export dialog, which gates it the same way. */}
-                      {templateHasVideo && (
-                        <SelectItem value="mp4">MP4</SelectItem>
-                      )}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Quality</Label>
-                  {isVideoFormat ? (
-                    // The encoder takes a CRF preset, not the 1-100 number the
-                    // image formats use — passing that number through would be
-                    // read as a CRF and quietly wreck the output.
-                    <Select value={videoQuality} onValueChange={setVideoQuality}>
-                      <SelectTrigger className="h-9">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="high">High</SelectItem>
-                        <SelectItem value="balanced">Balanced</SelectItem>
-                        <SelectItem value="small">Small</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <Input
-                      type="number"
-                      value={quality}
-                      onChange={(e) => setQuality(Number(e.target.value))}
-                      min={1}
-                      max={100}
-                      className="h-9"
-                    />
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Scale</Label>
-                  <Select
-                    value={String(scale)}
-                    onValueChange={(v) => setScale(Number(v))}
-                  >
-                    <SelectTrigger className="h-9">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1">1x</SelectItem>
-                      <SelectItem value="2">2x</SelectItem>
-                      <SelectItem value="3">3x</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+              <OutputSettingsFields
+                value={{
+                  format: output.format,
+                  quality: output.quality,
+                  scale: output.scale,
+                  fps: output.fps,
+                  videoQuality: output.videoQuality,
+                  durationSec: overrides.durationSec ?? "",
+                }}
+                onChange={(patch) =>
+                  setOverrides((prev) => ({ ...prev, ...patch }))
+                }
+                allowVideo={templateHasVideo}
+              />
+
+              <div className="flex items-center justify-between pt-1 text-xs text-muted-foreground">
+                {/* Deliberately image-only: the estimate is bytes-per-pixel of a
+                    single still, which says nothing useful about an encoded MP4. */}
+                <span>
+                  {templateData && !isVideoFormat
+                    ? `Est. size: ${estimateOutputSizeLabel({
+                        width: templateData.width || 1080,
+                        height: templateData.height || 1350,
+                        scale: output.scale,
+                        format: output.format,
+                        quality: output.quality,
+                        design: templateData.designJson,
+                      })}`
+                    : ""}
+                </span>
+                <span
+                  className="flex items-center gap-1"
+                  title={describeEstimate(estimate)}
+                >
+                  <Timer className="h-3 w-3" />
+                  Est. time: {formatEta(estimate.ms)}
+                  {estimate.basis === "estimate" ? " (rough)" : ""}
+                </span>
               </div>
 
-              {isVideoFormat && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Frame rate</Label>
-                    <Input
-                      type="number"
-                      value={fps}
-                      onChange={(e) => setFps(Number(e.target.value))}
-                      min={1}
-                      max={60}
-                      className="h-9"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Duration (s)</Label>
-                    <Input
-                      type="number"
-                      value={duration}
-                      onChange={(e) =>
-                        setDuration(e.target.value === "" ? "" : Number(e.target.value))
-                      }
-                      min={1}
-                      max={120}
-                      placeholder="Auto"
-                      className="h-9"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Deliberately image-only: this estimate is bytes-per-pixel of a
-                  single still, which says nothing useful about an encoded MP4. */}
-              {templateData && !isVideoFormat && (
-                <p className="text-xs text-muted-foreground pt-3">
-                  Est. size:{" "}
-                  {(() => {
-                    const pixels = (templateData.width || 1080) * scale * (templateData.height || 1350) * scale;
-                    
-                    // Calculate complexity from layers
-                    let complexityScore = 1;
-                    if (templateData?.designJson?.objects) {
-                      templateData.designJson.objects.forEach((obj: any) => {
-                        if (obj.type === 'image') complexityScore += 1.5;
-                        else if (obj.type === 'i-text' || obj.type === 'textbox') complexityScore += 0.2;
-                        else complexityScore += 0.1;
-                      });
-                    }
-                    const multiplier = Math.min(Math.max(complexityScore, 1), 6);
-
-                    const baseBytesPerPx =
-                      format === "png" 
-                        ? 0.05 
-                        : format === "webp" 
-                          ? 0.005 + (quality / 100) * 0.01 
-                          : 0.002 + (quality / 100) * 0.015;
-
-                    const sizeBytes = Math.round(pixels * baseBytesPerPx * multiplier);
-                    return sizeBytes > 1024 * 1024
-                      ? `~${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
-                      : `~${Math.round(sizeBytes / 1024)} KB`;
-                  })()}
-                </p>
+              {Object.keys(overrides).length > 0 && (
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                  onClick={() => setOverrides({})}
+                >
+                  Reset to defaults
+                </button>
               )}
             </CardContent>
           </Card>
@@ -556,6 +577,28 @@ export function PlaygroundContent() {
                 Encoding frames — this can take a few minutes.
               </p>
             </div>
+          )}
+
+          {/* Elapsed vs. remaining. Once a video job reports real progress its
+              own pace drives the countdown; before that (and for stills, which
+              report nothing until they finish) the historical estimate does. */}
+          {generateMutation.isPending && (
+            <p className="text-xs text-muted-foreground text-center">
+              {formatRenderTime(elapsedMs)} elapsed ·{" "}
+              {formatEta(
+                remainingMs({
+                  elapsedMs,
+                  progress: videoProgress,
+                  estimateMs: estimate.ms,
+                })
+              )}{" "}
+              left
+            </p>
+          )}
+          {!generateMutation.isPending && lastRenderMs !== null && (
+            <p className="text-xs text-muted-foreground text-center">
+              Rendered in {formatRenderTime(lastRenderMs)}
+            </p>
           )}
         </div>
 

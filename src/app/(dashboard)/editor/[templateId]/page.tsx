@@ -12,6 +12,24 @@ import { EXTRA_PROPS } from "@/lib/editor/serialized-props";
 import { VideoPreview, type VideoPreviewState } from "@/lib/editor/video-preview";
 import { FontPicker, type CustomFont } from "@/components/editor/font-picker";
 import { ExportDialog } from "@/components/editor/export-dialog";
+import {
+  OutputSettingsFields,
+  type OutputSettingsValue,
+} from "@/components/output-settings-fields";
+import {
+  crfToVideoQuality,
+  estimateOutputSizeLabel,
+  resolveOutputSettings,
+  videoQualityToCrf,
+  type PartialOutputSettings,
+} from "@/lib/output-settings";
+import { useOutputDefaults } from "@/hooks/use-output-settings";
+import { useRenderStats } from "@/hooks/use-render-stats";
+import {
+  describeEstimate,
+  estimateRenderMs,
+  formatEta,
+} from "@/lib/render-time";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -171,10 +189,14 @@ export default function EditorPage() {
   const [activeTool, setActiveTool] = useState<string>("select");
   const [canvasReady, setCanvasReady] = useState(false);
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
-  // Per-template output defaults
-  const [outputFormat, setOutputFormat] = useState<string>("");
-  const [outputQuality, setOutputQuality] = useState<number | "">("" );
-  const [outputScale, setOutputScale] = useState<number | "">("" );
+  /**
+   * Per-template output defaults. A blank field means "inherit the global
+   * default from Settings" — the same universal chain the Playground and the
+   * render API use (lib/output-settings.ts), so what is set here is what the
+   * template actually renders with everywhere.
+   */
+  const [templateOutput, setTemplateOutput] = useState<OutputSettingsValue>({});
+  const { defaults: globalOutputDefaults } = useOutputDefaults();
   // Layer drag-and-drop reordering state.
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const dragIndexRef = useRef<number | null>(null);
@@ -528,13 +550,17 @@ export default function EditorPage() {
       localCanvas = canvas;
       fabricCanvasRef.current = canvas;
       setTemplateName(template.name || "Untitled");
-      // Load per-template output defaults
-      const od = template.outputDefaults as any;
-      if (od) {
-        setOutputFormat(od.format || "");
-        setOutputQuality(od.quality ?? "");
-        setOutputScale(od.scale ?? "");
-      }
+      // Load per-template output defaults (image + video in one object).
+      const od = (template.outputDefaults as any) || {};
+      const vd = (template.videoDefaults as any) || {};
+      setTemplateOutput({
+        format: od.format || "",
+        quality: od.quality ?? "",
+        scale: od.scale ?? "",
+        fps: vd.fps ?? "",
+        durationSec: vd.durationSec ?? "",
+        videoQuality: vd.crf !== undefined ? crfToVideoQuality(vd.crf) : "",
+      });
 
       // Load existing design
       if (template.designJson?.objects?.length > 0) {
@@ -857,6 +883,31 @@ export default function EditorPage() {
   );
 
   // Save handler
+  /**
+   * The template's own output overrides, in the shape the API stores them:
+   * image settings on `outputDefaults`, MP4 settings on `videoDefaults`.
+   * Blank fields are omitted entirely so they keep inheriting the global
+   * defaults rather than being frozen at whatever they happened to show.
+   */
+  const templateDefaultsPayload = useCallback(() => {
+    const numberOrUndefined = (v: number | "" | undefined) =>
+      v === "" || v === undefined ? undefined : Number(v);
+    return {
+      outputDefaults: {
+        format: templateOutput.format || undefined,
+        quality: numberOrUndefined(templateOutput.quality),
+        scale: numberOrUndefined(templateOutput.scale),
+      },
+      videoDefaults: {
+        fps: numberOrUndefined(templateOutput.fps),
+        durationSec: numberOrUndefined(templateOutput.durationSec),
+        crf: templateOutput.videoQuality
+          ? videoQualityToCrf(templateOutput.videoQuality)
+          : undefined,
+      },
+    };
+  }, [templateOutput]);
+
   const handleSave = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
@@ -893,13 +944,9 @@ export default function EditorPage() {
       designJson: json,
       width: template?.width,
       height: template?.height,
-      outputDefaults: {
-        format: outputFormat || undefined,
-        quality: outputQuality !== "" ? Number(outputQuality) : undefined,
-        scale: outputScale !== "" ? Number(outputScale) : undefined,
-      },
+      ...templateDefaultsPayload(),
     });
-  }, [templateName, template, saveMutation, outputFormat, outputQuality, outputScale, stopVideoPreview]);
+  }, [templateName, template, saveMutation, templateDefaultsPayload, stopVideoPreview]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -1210,14 +1257,61 @@ export default function EditorPage() {
     input.click();
   }, [rerender]);
 
-  // Export dialog state
+  /**
+   * Export dialog state.
+   *
+   * Only what the user changes inside the dialog is stored here; everything
+   * else falls through to the resolved settings (global defaults → this
+   * template's overrides), so Export no longer starts from its own private
+   * png/100/2x that matched nothing else in the app.
+   */
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportFormat, setExportFormat] = useState<string>("png");
-  const [exportQuality, setExportQuality] = useState(100);
-  const [exportScale, setExportScale] = useState(2);
-  const [exportFps, setExportFps] = useState(30);
-  const [exportDuration, setExportDuration] = useState<number | "">("");
-  const [exportVideoQuality, setExportVideoQuality] = useState<"high" | "balanced" | "small">("balanced");
+  const [exportOverrides, setExportOverrides] = useState<OutputSettingsValue>(
+    {}
+  );
+
+  // What the Output popover currently resolves to — the values a render of
+  // this template will use, and the fallback for the Export dialog.
+  const resolvedOutput = resolveOutputSettings(
+    globalOutputDefaults,
+    templateOutput as PartialOutputSettings
+  );
+  const exportSettings = resolveOutputSettings(
+    resolvedOutput,
+    exportOverrides as PartialOutputSettings
+  );
+  const exportFormat = exportOverrides.format || exportSettings.format;
+  const exportQuality = exportSettings.quality;
+  const exportScale = exportSettings.scale;
+  const exportFps = exportSettings.fps;
+  const exportDuration = exportOverrides.durationSec ?? "";
+  const exportVideoQuality = exportSettings.videoQuality;
+
+  // Render-time history, used for the "Est. time" readouts. Only MP4 export
+  // goes through the server; PNG/JPG/WebP/SVG are drawn straight from the
+  // canvas here and are effectively instant, so no estimate is offered for
+  // them in the Export dialog.
+  const { data: editorRenderStats } = useRenderStats();
+  // The Output popover configures server-side renders (API / Automate), so an
+  // estimate is meaningful there for stills as well as MP4.
+  const outputEstimate = estimateRenderMs(editorRenderStats, {
+    kind: resolvedOutput.format === "mp4" ? "video" : "image",
+    templateId: template?.templateId,
+    width: template?.width,
+    height: template?.height,
+    scale: resolvedOutput.scale,
+    fps: resolvedOutput.fps,
+    durationSec: resolvedOutput.durationSec,
+  });
+  const exportEstimate = estimateRenderMs(editorRenderStats, {
+    kind: exportFormat === "mp4" ? "video" : "image",
+    templateId: template?.templateId,
+    width: template?.width,
+    height: template?.height,
+    scale: exportScale,
+    fps: exportFps,
+    durationSec: typeof exportDuration === "number" ? exportDuration : null,
+  });
 
   const doExport = useCallback(async () => {
     const canvas = fabricCanvasRef.current;
@@ -1239,11 +1333,7 @@ export default function EditorPage() {
             designJson: json,
             width: template?.width,
             height: template?.height,
-            outputDefaults: {
-              format: outputFormat || undefined,
-              quality: outputQuality !== "" ? Number(outputQuality) : undefined,
-              scale: outputScale !== "" ? Number(outputScale) : undefined,
-            },
+            ...templateDefaultsPayload(),
           }),
         });
         if (!saveRes.ok) throw new Error("Failed to save template before MP4 export");
@@ -1293,13 +1383,15 @@ export default function EditorPage() {
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
       } else {
+        // The dialog speaks the app's format names (jpg); Fabric's toDataURL
+        // only knows the MIME spelling (jpeg).
         const dataURL = canvas.toDataURL({
-          format: exportFormat as any,
+          format: (exportFormat === "jpg" ? "jpeg" : exportFormat) as any,
           quality: exportQuality / 100,
           multiplier: exportScale,
         });
         const link = document.createElement("a");
-        link.download = `${templateName || "template"}.${exportFormat === "jpeg" ? "jpg" : exportFormat}`;
+        link.download = `${templateName || "template"}.${exportFormat}`;
         link.href = dataURL;
         document.body.appendChild(link);
         link.click();
@@ -1313,7 +1405,7 @@ export default function EditorPage() {
     }
     setExportOpen(false);
     toast.success(`Exported as ${exportFormat.toUpperCase()}`);
-  }, [templateName, exportFormat, exportQuality, exportScale, exportFps, exportDuration, exportVideoQuality, zoom, fitPct, template, outputFormat, outputQuality, outputScale, router, stopVideoPreview]);
+  }, [templateName, exportFormat, exportQuality, exportScale, exportFps, exportDuration, exportVideoQuality, zoom, fitPct, template, templateDefaultsPayload, router, stopVideoPreview]);
 
   // Update selected object property
   const updateProp = useCallback(
@@ -1730,126 +1822,61 @@ export default function EditorPage() {
             </PopoverTrigger>
             <PopoverContent
               align="end"
-              className="w-72 p-4 border-white/10"
+              className="w-80 p-4 border-white/10"
               style={{
                 backgroundColor: "#14171c",
                 color: "#e6e8ec",
               }}
             >
-              <h4 className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: "#c4c9d2" }}>
+              <h4 className="text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "#c4c9d2" }}>
                 Output Settings
               </h4>
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                    Format
-                  </Label>
-                  <Select
-                    value={outputFormat || "__default__"}
-                    onValueChange={(v) => {
-                      setOutputFormat(v === "__default__" ? "" : v);
-                      setSaved(false);
-                    }}
-                  >
-                    <SelectTrigger className="h-8 text-xs bg-[#1f232a] border-white/[0.1] text-[#e6e8ec]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="bg-[#14171c] border-white/[0.1] text-[#e6e8ec]">
-                      <SelectItem value="__default__">Use global default</SelectItem>
-                      <SelectItem value="png">PNG</SelectItem>
-                      <SelectItem value="jpg">JPG</SelectItem>
-                      <SelectItem value="webp">WebP</SelectItem>
-                      {/* outputDefaults.format has always accepted "mp4" (see
-                          the templates schema and resolveOutput), but it was
-                          missing here, so a video template could never default
-                          to MP4. Only offered when the canvas actually has a
-                          video layer — an MP4 render without one is rejected. */}
-                      {canvasHasVideo && <SelectItem value="mp4">MP4</SelectItem>}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                      Quality
-                    </Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={outputQuality}
-                      onChange={(e) => {
-                        setOutputQuality(e.target.value ? Number(e.target.value) : "");
-                        setSaved(false);
-                      }}
-                      placeholder="Default"
-                      className="h-8 text-xs bg-[#1f232a] border-white/[0.1] text-[#e6e8ec]"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                      Scale
-                    </Label>
-                    <Select
-                      value={outputScale !== "" ? String(outputScale) : "__default__"}
-                      onValueChange={(v) => {
-                        setOutputScale(v === "__default__" ? "" : Number(v));
-                        setSaved(false);
-                      }}
-                    >
-                      <SelectTrigger className="h-8 text-xs bg-[#1f232a] border-white/[0.1] text-[#e6e8ec]">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent className="bg-[#14171c] border-white/[0.1] text-[#e6e8ec]">
-                        <SelectItem value="__default__">Default</SelectItem>
-                        <SelectItem value="1">1x</SelectItem>
-                        <SelectItem value="2">2x</SelectItem>
-                        <SelectItem value="3">3x</SelectItem>
-                        <SelectItem value="4">4x</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-                {(() => {
-                  const w = template?.width || 1080;
-                  const h = template?.height || 1350;
-                  const s = outputScale !== "" ? Number(outputScale) : 1;
-                  const q = outputQuality !== "" ? Number(outputQuality) : 90;
-                  const fmt = outputFormat || "png";
-                  const pixels = w * s * h * s;
-
-                  // Calculate complexity from layers
-                  let complexityScore = 1;
-                  if (template?.designJson?.objects) {
-                    template.designJson.objects.forEach((obj: any) => {
-                      if (obj.type === 'image') complexityScore += 1.5;
-                      else if (obj.type === 'i-text' || obj.type === 'textbox') complexityScore += 0.2;
-                      else complexityScore += 0.1;
-                    });
-                  }
-                  const multiplier = Math.min(Math.max(complexityScore, 1), 6);
-                  
-                  // Adjusted for highly compressible graphic templates (solid colors/text):
-                  const baseBytesPerPx =
-                    fmt === "png" 
-                      ? 0.05 
-                      : fmt === "webp" 
-                        ? 0.005 + (q / 100) * 0.01 
-                        : 0.002 + (q / 100) * 0.015;
-                        
-                  const sizeBytes = Math.round(pixels * baseBytesPerPx * multiplier);
-                  const sizeStr =
-                    sizeBytes > 1024 * 1024
-                      ? `~${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
-                      : `~${Math.round(sizeBytes / 1024)} KB`;
-                  return (
-                    <p className="text-[10px] pt-1" style={{ color: "#8b919c" }}>
-                      Est. size: {sizeStr}
-                    </p>
-                  );
-                })()}
+              <p className="text-[10px] mb-3" style={{ color: "#8b919c" }}>
+                Overrides for this template. Anything left on the global default
+                follows Settings → Output Settings.
+              </p>
+              {/* Same component, same options and same precedence as the
+                  Settings screen and the Playground. */}
+              <OutputSettingsFields
+                dark
+                allowInherit
+                allowVideo={canvasHasVideo}
+                inherited={globalOutputDefaults}
+                value={templateOutput}
+                onChange={(patch) => {
+                  setTemplateOutput((prev) => ({ ...prev, ...patch }));
+                  setSaved(false);
+                }}
+              />
+              <div className="mt-3 space-y-1">
+                <p className="text-[10px]" style={{ color: "#8b919c" }}>
+                  Renders as: {resolvedOutput.format.toUpperCase()} ·{" "}
+                  {resolvedOutput.scale}x ·{" "}
+                  {(template?.width || 1080) * resolvedOutput.scale} ×{" "}
+                  {(template?.height || 1350) * resolvedOutput.scale}px
+                </p>
+                {resolvedOutput.format !== "mp4" && (
+                  <p className="text-[10px]" style={{ color: "#8b919c" }}>
+                    Est. size:{" "}
+                    {estimateOutputSizeLabel({
+                      width: template?.width || 1080,
+                      height: template?.height || 1350,
+                      scale: resolvedOutput.scale,
+                      format: resolvedOutput.format,
+                      quality: resolvedOutput.quality,
+                      design: template?.designJson,
+                    })}
+                  </p>
+                )}
+                <p
+                  className="text-[10px]"
+                  style={{ color: "#8b919c" }}
+                  title={describeEstimate(outputEstimate)}
+                >
+                  Est. render time: {formatEta(outputEstimate.ms)}
+                  {outputEstimate.basis === "estimate" ? " (rough)" : ""}
+                </p>
               </div>
-
             </PopoverContent>
           </Popover>
 
@@ -2805,20 +2832,46 @@ export default function EditorPage() {
         open={exportOpen}
         onOpenChange={setExportOpen}
         exportFormat={exportFormat}
-        setExportFormat={setExportFormat}
+        setExportFormat={(format) =>
+          setExportOverrides((prev) => ({ ...prev, format }))
+        }
         exportQuality={exportQuality}
-        setExportQuality={setExportQuality}
+        setExportQuality={(quality) =>
+          setExportOverrides((prev) => ({ ...prev, quality }))
+        }
         exportScale={exportScale}
-        setExportScale={setExportScale}
+        setExportScale={(scale) =>
+          setExportOverrides((prev) => ({ ...prev, scale }))
+        }
         exportFps={exportFps}
-        setExportFps={setExportFps}
+        setExportFps={(fps) => setExportOverrides((prev) => ({ ...prev, fps }))}
         exportDuration={exportDuration}
-        setExportDuration={setExportDuration}
+        setExportDuration={(durationSec) =>
+          setExportOverrides((prev) => ({ ...prev, durationSec }))
+        }
         exportVideoQuality={exportVideoQuality}
-        setExportVideoQuality={setExportVideoQuality}
+        setExportVideoQuality={(videoQuality) =>
+          setExportOverrides((prev) => ({ ...prev, videoQuality }))
+        }
         canvasHasVideo={canvasHasVideo}
         templateWidth={template?.width || 1080}
         templateHeight={template?.height || 1350}
+        estimateLabel={
+          exportFormat === "mp4" ? formatEta(exportEstimate.ms) : null
+        }
+        estimateTitle={describeEstimate(exportEstimate)}
+        sizeLabel={
+          exportFormat === "mp4" || exportFormat === "svg"
+            ? null
+            : estimateOutputSizeLabel({
+                width: template?.width || 1080,
+                height: template?.height || 1350,
+                scale: exportScale,
+                format: exportFormat,
+                quality: exportQuality,
+                design: template?.designJson,
+              })
+        }
         onExport={doExport}
       />
     </>

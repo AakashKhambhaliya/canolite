@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,18 +30,51 @@ import {
   Lock,
   HardDrive,
   Trash2,
+  Timer,
 } from "lucide-react";
+import {
+  OutputSettingsFields,
+  type OutputSettingsValue,
+} from "@/components/output-settings-fields";
+import {
+  FALLBACK_OUTPUT_SETTINGS,
+  FORMAT_LABELS,
+  VIDEO_QUALITY_LABELS,
+  normalizeFormat,
+  normalizeVideoQuality,
+} from "@/lib/output-settings";
+import { useRenderStats } from "@/hooks/use-render-stats";
+import { formatRenderTime } from "@/lib/render-time";
+
+/** Retention choices, in hours. */
+const RETENTION_OPTIONS: { value: number; label: string }[] = [
+  { value: 1, label: "1 hour" },
+  { value: 6, label: "6 hours" },
+  { value: 12, label: "12 hours" },
+  { value: 24, label: "24 hours" },
+  { value: 72, label: "3 days" },
+  { value: 168, label: "7 days" },
+  { value: 720, label: "30 days" },
+];
 
 export default function SettingsPage() {
+  const queryClient = useQueryClient();
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookSecret, setWebhookSecret] = useState("");
-  const [defaultFormat, setDefaultFormat] = useState("png");
-  const [defaultQuality, setDefaultQuality] = useState(90);
-  const [defaultScale, setDefaultScale] = useState(1);
+  // One object for every output default — image and video alike. This is the
+  // single set of values the editor, the Playground and the API all resolve
+  // against (lib/output-settings.ts).
+  const [output, setOutput] = useState<OutputSettingsValue>({
+    format: FALLBACK_OUTPUT_SETTINGS.format,
+    quality: FALLBACK_OUTPUT_SETTINGS.quality,
+    scale: FALLBACK_OUTPUT_SETTINGS.scale,
+    fps: FALLBACK_OUTPUT_SETTINGS.fps,
+    videoQuality: FALLBACK_OUTPUT_SETTINGS.videoQuality,
+  });
   const [retentionHours, setRetentionHours] = useState(24);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [cleaning, setCleaning] = useState(false);
+  const [cleaning, setCleaning] = useState<"retention" | "all" | null>(null);
 
   // Change-password form
   const [currentPassword, setCurrentPassword] = useState("");
@@ -95,14 +128,46 @@ export default function SettingsPage() {
     },
   });
 
+  /**
+   * How much there is to clean up right now.
+   *
+   * Without this the "Clean Now" button was a black box: on a project whose
+   * renders were all newer than the retention period it correctly deleted
+   * nothing and reported "Cleaned up 0 old renders", which reads as broken.
+   * Showing the two counts up front makes the outcome predictable.
+   */
+  const { data: cleanupStatus } = useQuery<{
+    pending: number;
+    total: number;
+    retention_hours: number;
+  }>({
+    queryKey: ["cleanup-status"],
+    queryFn: async () => {
+      const res = await fetch("/api/cleanup");
+      if (!res.ok) throw new Error("Failed to load cleanup status");
+      return res.json();
+    },
+    refetchInterval: 30_000,
+  });
+
+  const { data: renderStats } = useRenderStats();
+
   // Populate form when settings load
   useEffect(() => {
     if (settings) {
       setWebhookUrl(settings.webhookUrl || "");
       setWebhookSecret(settings.webhookSecret || "");
-      setDefaultFormat(settings.defaultFormat || "png");
-      setDefaultQuality(settings.defaultQuality ?? 90);
-      setDefaultScale(settings.defaultScale ?? 1);
+      setOutput({
+        format:
+          normalizeFormat(settings.defaultFormat) ??
+          FALLBACK_OUTPUT_SETTINGS.format,
+        quality: settings.defaultQuality ?? FALLBACK_OUTPUT_SETTINGS.quality,
+        scale: settings.defaultScale ?? FALLBACK_OUTPUT_SETTINGS.scale,
+        fps: settings.defaultFps ?? FALLBACK_OUTPUT_SETTINGS.fps,
+        videoQuality:
+          normalizeVideoQuality(settings.defaultVideoQuality) ??
+          FALLBACK_OUTPUT_SETTINGS.videoQuality,
+      });
       setRetentionHours(settings.retentionHours ?? 24);
     }
   }, [settings]);
@@ -116,18 +181,90 @@ export default function SettingsPage() {
         body: JSON.stringify({
           webhookUrl,
           webhookSecret,
-          defaultFormat,
-          defaultQuality,
-          defaultScale,
+          defaultFormat: output.format || FALLBACK_OUTPUT_SETTINGS.format,
+          defaultQuality:
+            output.quality === "" || output.quality === undefined
+              ? FALLBACK_OUTPUT_SETTINGS.quality
+              : output.quality,
+          defaultScale:
+            output.scale === "" || output.scale === undefined
+              ? FALLBACK_OUTPUT_SETTINGS.scale
+              : output.scale,
+          defaultFps:
+            output.fps === "" || output.fps === undefined
+              ? FALLBACK_OUTPUT_SETTINGS.fps
+              : output.fps,
+          defaultVideoQuality:
+            output.videoQuality || FALLBACK_OUTPUT_SETTINGS.videoQuality,
           retentionHours,
         }),
       });
-      if (!res.ok) throw new Error("Failed to save");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to save");
+      }
+      // Every other screen resolves against these values, so refresh them.
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+      queryClient.invalidateQueries({ queryKey: ["cleanup-status"] });
       toast.success("Settings saved");
-    } catch {
-      toast.error("Failed to save settings");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save settings"
+      );
     } finally {
       setSaving(false);
+    }
+  };
+
+  /**
+   * Run a cleanup. `scope: "retention"` applies the period shown in the form
+   * right now (so it works without saving first); `scope: "all"` deletes every
+   * render regardless of age.
+   */
+  const runCleanup = async (scope: "retention" | "all") => {
+    if (
+      scope === "all" &&
+      !window.confirm(
+        `Delete all ${cleanupStatus?.total ?? ""} renders and their files? This can't be undone.`
+      )
+    ) {
+      return;
+    }
+    setCleaning(scope);
+    try {
+      const res = await fetch("/api/cleanup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          scope === "all" ? { scope } : { scope, retentionHours }
+        ),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        toast.error(data.error || "Cleanup failed");
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ["cleanup-status"] });
+      queryClient.invalidateQueries({ queryKey: ["renders"] });
+      queryClient.invalidateQueries({ queryKey: ["render-stats"] });
+
+      if (data.deleted === 0) {
+        // Say why nothing happened instead of reporting a hollow success.
+        toast.info(
+          scope === "all"
+            ? "There were no renders to delete"
+            : `Nothing to clean — no renders are older than ${retentionHours}h`
+        );
+        return;
+      }
+      toast.success(
+        `Deleted ${data.deleted} render${data.deleted === 1 ? "" : "s"}` +
+          (data.errors ? ` (${data.errors} file errors)` : "")
+      );
+    } catch {
+      toast.error("Cleanup failed");
+    } finally {
+      setCleaning(null);
     }
   };
 
@@ -166,6 +303,19 @@ export default function SettingsPage() {
       </div>
     );
   }
+
+  const summary = [
+    FORMAT_LABELS[
+      (normalizeFormat(output.format) ?? FALLBACK_OUTPUT_SETTINGS.format)
+    ],
+    `${output.scale || 1}x`,
+    `quality ${output.quality || FALLBACK_OUTPUT_SETTINGS.quality}`,
+    `${output.fps || FALLBACK_OUTPUT_SETTINGS.fps} fps`,
+    VIDEO_QUALITY_LABELS[
+      normalizeVideoQuality(output.videoQuality) ??
+        FALLBACK_OUTPUT_SETTINGS.videoQuality
+    ].toLowerCase(),
+  ].join(" · ");
 
   return (
     <div className="p-6 lg:p-8 max-w-3xl mx-auto">
@@ -234,61 +384,66 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Default output */}
+        {/* Universal output defaults */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">
-              Default Output Settings
-            </CardTitle>
+            <CardTitle className="text-base">Output Settings</CardTitle>
             <CardDescription>
-              Applied when API requests don&apos;t specify output parameters
+              The defaults for every render — the editor&apos;s Output panel and
+              Export dialog, the Playground, and API requests that don&apos;t
+              specify their own. Templates and individual requests can still
+              override any field; everything else follows what you set here.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <OutputSettingsFields
+              value={output}
+              onChange={(patch) => setOutput((prev) => ({ ...prev, ...patch }))}
+              allowVideo
+              videoFields="always"
+              // Clip length is per render (default: as long as the timeline
+              // needs), so there is nothing sensible to store as a global one.
+              showDuration={false}
+            />
+            <p className="text-xs text-muted-foreground">
+              Current default: {summary}
+            </p>
+          </CardContent>
+        </Card>
+
+        {/* Render performance */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Timer className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-base">Render Times</CardTitle>
+            </div>
+            <CardDescription>
+              Measured from this project&apos;s completed renders. These are the
+              numbers behind the estimates shown before you render.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-3 gap-4">
-              <div className="space-y-2">
-                <Label>Format</Label>
-                <Select
-                  value={defaultFormat}
-                  onValueChange={setDefaultFormat}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="png">PNG</SelectItem>
-                    <SelectItem value="jpg">JPG</SelectItem>
-                    <SelectItem value="webp">WebP</SelectItem>
-                  </SelectContent>
-                </Select>
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <span className="text-muted-foreground">Images (typical)</span>
+                <p className="mt-1 font-medium">
+                  {renderStats?.image
+                    ? `${formatRenderTime(renderStats.image.medianMs)} · ${
+                        renderStats.image.samples
+                      } sample${renderStats.image.samples === 1 ? "" : "s"}`
+                    : "No completed image renders yet"}
+                </p>
               </div>
-              <div className="space-y-2">
-                <Label>Quality</Label>
-                <Input
-                  type="number"
-                  value={defaultQuality}
-                  onChange={(e) =>
-                    setDefaultQuality(Number(e.target.value))
-                  }
-                  min={1}
-                  max={100}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Scale</Label>
-                <Select
-                  value={String(defaultScale)}
-                  onValueChange={(v) => setDefaultScale(Number(v))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1">1x</SelectItem>
-                    <SelectItem value="2">2x</SelectItem>
-                    <SelectItem value="3">3x</SelectItem>
-                  </SelectContent>
-                </Select>
+              <div>
+                <span className="text-muted-foreground">Videos (typical)</span>
+                <p className="mt-1 font-medium">
+                  {renderStats?.video
+                    ? `${formatRenderTime(renderStats.video.medianMs)} · ${
+                        renderStats.video.samples
+                      } sample${renderStats.video.samples === 1 ? "" : "s"}`
+                    : "No completed video renders yet"}
+                </p>
               </div>
             </div>
           </CardContent>
@@ -302,7 +457,8 @@ export default function SettingsPage() {
               <CardTitle className="text-base">Storage</CardTitle>
             </div>
             <CardDescription>
-              Rendered images are auto-deleted after the retention period
+              Rendered files are auto-deleted after the retention period. You can
+              also clear them yourself at any time.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -317,51 +473,74 @@ export default function SettingsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="1">1 hour</SelectItem>
-                    <SelectItem value="6">6 hours</SelectItem>
-                    <SelectItem value="12">12 hours</SelectItem>
-                    <SelectItem value="24">24 hours</SelectItem>
-                    <SelectItem value="72">3 days</SelectItem>
-                    <SelectItem value="168">7 days</SelectItem>
-                    <SelectItem value="720">30 days</SelectItem>
+                    {RETENTION_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={String(opt.value)}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                {cleanupStatus &&
+                  cleanupStatus.retention_hours !== retentionHours && (
+                    <p className="text-xs text-amber-600 dark:text-amber-500">
+                      Unsaved — the automatic sweep still uses{" "}
+                      {cleanupStatus.retention_hours}h until you save. Manual
+                      cleanup below uses the {retentionHours}h shown here.
+                    </p>
+                  )}
               </div>
               <div className="space-y-2">
                 <Label>Manual Cleanup</Label>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  disabled={cleaning}
-                  onClick={async () => {
-                    setCleaning(true);
-                    try {
-                      const res = await fetch("/api/cleanup", { method: "POST" });
-                      const data = await res.json();
-                      if (data.success) {
-                        toast.success(`Cleaned up ${data.deleted} old renders`);
-                      } else {
-                        toast.error("Cleanup failed");
-                      }
-                    } catch {
-                      toast.error("Cleanup failed");
-                    } finally {
-                      setCleaning(false);
-                    }
-                  }}
-                >
-                  {cleaning ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Trash2 className="mr-2 h-4 w-4" />
-                  )}
-                  Clean Now
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    disabled={cleaning !== null}
+                    onClick={() => runCleanup("retention")}
+                    title={`Delete renders older than ${retentionHours}h`}
+                  >
+                    {cleaning === "retention" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="mr-2 h-4 w-4" />
+                    )}
+                    Clean Now
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="flex-1 text-destructive hover:text-destructive"
+                    disabled={cleaning !== null || cleanupStatus?.total === 0}
+                    onClick={() => runCleanup("all")}
+                    title="Delete every render in this project, whatever its age"
+                  >
+                    {cleaning === "all" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="mr-2 h-4 w-4" />
+                    )}
+                    Delete All
+                  </Button>
+                </div>
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Completed renders older than the retention period are automatically
-              deleted on every server restart and periodically while running.
+              {cleanupStatus ? (
+                <>
+                  <strong>{cleanupStatus.total}</strong> render
+                  {cleanupStatus.total === 1 ? "" : "s"} stored,{" "}
+                  <strong>{cleanupStatus.pending}</strong> past the{" "}
+                  {cleanupStatus.retention_hours}h retention period.{" "}
+                  {cleanupStatus.pending === 0 && cleanupStatus.total > 0
+                    ? "“Clean Now” will delete nothing until renders age past the period — use “Delete All” to clear them immediately."
+                    : ""}
+                </>
+              ) : (
+                "Checking stored renders…"
+              )}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              The automatic sweep runs on every server restart and hourly while
+              running, and only removes finished renders.
             </p>
           </CardContent>
         </Card>

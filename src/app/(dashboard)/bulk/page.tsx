@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useMemo, useState, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -32,7 +32,24 @@ import {
   AlertCircle,
   Table,
   Zap,
+  Timer,
 } from "lucide-react";
+import {
+  OutputSettingsFields,
+  type OutputSettingsValue,
+} from "@/components/output-settings-fields";
+import {
+  resolveOutputSettings,
+  type PartialOutputSettings,
+} from "@/lib/output-settings";
+import { useOutputDefaults } from "@/hooks/use-output-settings";
+import { useRenderStats } from "@/hooks/use-render-stats";
+import {
+  describeEstimate,
+  estimateBatchMs,
+  estimateRenderMs,
+  formatEta,
+} from "@/lib/render-time";
 
 /**
  * Parse CSV text handling quoted fields (commas, newlines, escaped quotes).
@@ -90,9 +107,10 @@ export default function BulkPage() {
   const [csvData, setCsvData] = useState<string[][]>([]);
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
-  const [format, setFormat] = useState("png");
-  const [quality, setQuality] = useState(90);
-  const [scale, setScale] = useState(1);
+  // Same universal chain as everywhere else: global defaults, then the
+  // template's own overrides, then anything changed for this batch.
+  const [overrides, setOverrides] = useState<OutputSettingsValue>({});
+  const { defaults } = useOutputDefaults();
 
   const { data: templates } = useQuery({
     queryKey: ["templates"],
@@ -115,6 +133,33 @@ export default function BulkPage() {
     },
     enabled: !!selectedTemplate && !!templates,
   });
+
+  const output = useMemo(
+    () =>
+      resolveOutputSettings(
+        defaults,
+        (templateData?.outputDefaults as PartialOutputSettings) || {},
+        overrides as PartialOutputSettings
+      ),
+    [defaults, templateData, overrides]
+  );
+
+  // How long the whole batch is likely to take, at the server's render
+  // concurrency — the number people actually want before queuing 500 images.
+  const rowCount = Math.max(0, csvData.length - 1);
+  const { data: renderStats } = useRenderStats();
+  const perRenderEstimate = estimateRenderMs(renderStats, {
+    kind: "image",
+    templateId: selectedTemplate || null,
+    width: templateData?.width,
+    height: templateData?.height,
+    scale: output.scale,
+  });
+  const batchEstimateMs = estimateBatchMs(
+    perRenderEstimate.ms,
+    rowCount,
+    renderStats?.concurrency?.image
+  );
 
   const batchMutation = useMutation({
     mutationFn: async () => {
@@ -142,9 +187,9 @@ export default function BulkPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           template_id: selectedTemplate,
-          format,
-          quality,
-          scale,
+          format: output.format,
+          quality: output.quality,
+          scale: output.scale,
           items,
         }),
       });
@@ -431,45 +476,34 @@ export default function BulkPage() {
               </p>
             )}
 
-            {/* Output settings */}
-            <div className="grid grid-cols-3 gap-3 pt-2">
-              <div className="space-y-1.5">
-                <Label className="text-xs">Format</Label>
-                <Select value={format} onValueChange={setFormat}>
-                  <SelectTrigger className="h-9">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="png">PNG</SelectItem>
-                    <SelectItem value="jpg">JPG</SelectItem>
-                    <SelectItem value="webp">WebP</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Quality</Label>
-                <Input
-                  type="number"
-                  value={quality}
-                  onChange={(e) => setQuality(Number(e.target.value))}
-                  min={1}
-                  max={100}
-                  className="h-9"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Scale</Label>
-                <Select value={String(scale)} onValueChange={(v) => setScale(Number(v))}>
-                  <SelectTrigger className="h-9">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="1">1x</SelectItem>
-                    <SelectItem value="2">2x</SelectItem>
-                    <SelectItem value="3">3x</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+            {/* Output settings — the shared fields, starting from the global
+                defaults and this template's overrides. */}
+            <div className="pt-2 space-y-3">
+              <OutputSettingsFields
+                value={{
+                  format: output.format,
+                  quality: output.quality,
+                  scale: output.scale,
+                }}
+                onChange={(patch) =>
+                  setOverrides((prev) => ({ ...prev, ...patch }))
+                }
+              />
+              <p
+                className="text-xs text-muted-foreground flex items-center gap-1.5"
+                title={describeEstimate(perRenderEstimate)}
+              >
+                <Timer className="h-3.5 w-3.5" />
+                Est. rendering time: {formatEta(batchEstimateMs)} for {rowCount}{" "}
+                image{rowCount === 1 ? "" : "s"} ({formatEta(
+                  perRenderEstimate.ms
+                )}{" "}
+                each
+                {renderStats?.concurrency?.image
+                  ? `, ${renderStats.concurrency.image} at a time`
+                  : ""}
+                )
+              </p>
             </div>
 
             <div className="flex justify-between pt-4">

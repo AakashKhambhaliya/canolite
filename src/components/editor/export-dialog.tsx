@@ -20,6 +20,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import {
+  FPS_PRESETS,
+  IMAGE_FORMATS,
+  MAX_DURATION_SEC,
+  MIN_DURATION_SEC,
+  SCALE_OPTIONS,
+  VIDEO_QUALITY_LABELS,
+  VIDEO_QUALITY_PRESETS,
+} from "@/lib/output-settings";
 
 interface ExportDialogProps {
   open: boolean;
@@ -39,6 +48,12 @@ interface ExportDialogProps {
   canvasHasVideo: boolean;
   templateWidth: number;
   templateHeight: number;
+  /** "~6s" for an MP4 export; null when the export happens locally. */
+  estimateLabel?: string | null;
+  /** Hover text explaining where the estimate comes from. */
+  estimateTitle?: string;
+  /** "~1.2 MB", or null for formats the estimator can't speak to. */
+  sizeLabel?: string | null;
   onExport: () => void;
 }
 
@@ -60,6 +75,9 @@ export function ExportDialog({
   canvasHasVideo,
   templateWidth,
   templateHeight,
+  estimateLabel,
+  estimateTitle,
+  sizeLabel,
   onExport,
 }: ExportDialogProps) {
   return (
@@ -92,7 +110,10 @@ export function ExportDialog({
               Format
             </Label>
             <div className="grid grid-cols-4 gap-2">
-              {(["png", "jpeg", "webp", "svg", ...(canvasHasVideo ? ["mp4" as const] : [])] as const).map((fmt) => (
+              {/* Format names match the rest of the app (JPG, not JPEG — see
+                  lib/output-settings.ts). SVG is export-only: it is drawn from
+                  the canvas here and the render API has no equivalent. */}
+              {([...IMAGE_FORMATS, "svg", ...(canvasHasVideo ? ["mp4" as const] : [])] as const).map((fmt) => (
                 <button
                   key={fmt}
                   onClick={() => setExportFormat(fmt)}
@@ -110,8 +131,8 @@ export function ExportDialog({
             </div>
           </div>
 
-          {/* Quality (only for JPEG/WebP) */}
-          {(exportFormat === "jpeg" || exportFormat === "webp") && (
+          {/* Quality (only for the lossy image formats) */}
+          {(exportFormat === "jpg" || exportFormat === "webp") && (
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
@@ -134,7 +155,7 @@ export function ExportDialog({
           {exportFormat === "mp4" && (
             <div className="space-y-3 rounded-lg border border-white/[0.08] p-3">
               <div className="grid grid-cols-3 gap-2">
-                {[24, 30, 60].map((fps) => (
+                {FPS_PRESETS.map((fps) => (
                   <button
                     key={fps}
                     onClick={() => setExportFps(fps)}
@@ -149,8 +170,8 @@ export function ExportDialog({
               </div>
               <Input
                 type="number"
-                min={0.1}
-                max={120}
+                min={MIN_DURATION_SEC}
+                max={MAX_DURATION_SEC}
                 step={0.1}
                 placeholder="Auto duration"
                 value={exportDuration}
@@ -162,9 +183,11 @@ export function ExportDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="high">High quality</SelectItem>
-                  <SelectItem value="balanced">Balanced</SelectItem>
-                  <SelectItem value="small">Small file</SelectItem>
+                  {VIDEO_QUALITY_PRESETS.map((preset) => (
+                    <SelectItem key={preset} value={preset}>
+                      {VIDEO_QUALITY_LABELS[preset]}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -177,7 +200,7 @@ export function ExportDialog({
                 Scale
               </Label>
               <div className="grid grid-cols-4 gap-2">
-                {[1, 2, 3, 4].map((s) => (
+                {SCALE_OPTIONS.map((s) => (
                   <button
                     key={s}
                     onClick={() => setExportScale(s)}
@@ -196,6 +219,21 @@ export function ExportDialog({
               <p className="text-[10px]" style={{ color: "#8b919c" }}>
                 Output: {templateWidth * exportScale} × {templateHeight * exportScale}px
               </p>
+            </div>
+          )}
+
+          {/* Estimates. MP4 is rendered on the server, so it gets a time
+              estimate from this project's measured render history; the other
+              formats are drawn from the canvas here and finish immediately. */}
+          {(sizeLabel || estimateLabel) && (
+            <div
+              className="flex items-center justify-between text-[10px]"
+              style={{ color: "#8b919c" }}
+            >
+              <span>{sizeLabel ? `Est. size: ${sizeLabel}` : ""}</span>
+              {estimateLabel && (
+                <span title={estimateTitle}>Est. time: {estimateLabel}</span>
+              )}
             </div>
           )}
 

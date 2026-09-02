@@ -13,6 +13,15 @@ import { generateId } from "@/lib/utils";
 import { applyModifications, type Modification } from "./apply-modifications";
 import { isUrlSafe } from "@/lib/ssrf";
 import { config } from "@/lib/config";
+import {
+  crfToVideoQuality,
+  projectDefaultsLayer,
+  resolveOutputSettings,
+  videoQualityToCrf,
+  type OutputSettings,
+  type PartialOutputSettings,
+  type VideoQualityPreset,
+} from "@/lib/output-settings";
 
 export interface OutputOptions {
   format?: string;
@@ -24,6 +33,8 @@ export interface GlobalDefaults {
   defaultFormat?: string | null;
   defaultQuality?: number | null;
   defaultScale?: number | null;
+  defaultFps?: number | null;
+  defaultVideoQuality?: string | null;
 }
 
 export interface ResolvedOutput {
@@ -32,19 +43,62 @@ export interface ResolvedOutput {
   scale: number;
 }
 
+/**
+ * Resolve an image render's output settings.
+ *
+ * The precedence chain (request → template → project → fallback) lives in
+ * lib/output-settings.ts and is shared with every UI surface, so what the
+ * Playground previews is what the renderer produces.
+ */
 export function resolveOutput(
   template: { outputDefaults?: unknown },
   opts: OutputOptions,
   global?: GlobalDefaults
 ): ResolvedOutput {
-  const tpl = (template.outputDefaults as any) || {};
-  const g = global || {};
-  // Priority: API request → template-level → global settings → hardcoded
+  const resolved = resolveOutputSettings(
+    projectDefaultsLayer(global),
+    (template.outputDefaults as PartialOutputSettings) || {},
+    opts as PartialOutputSettings
+  );
   return {
-    format: opts.format || tpl.format || g.defaultFormat || "png",
-    quality: opts.quality || tpl.quality || g.defaultQuality || 90,
-    scale: Math.min(opts.scale || tpl.scale || g.defaultScale || 1, 4),
+    format: resolved.format,
+    quality: resolved.quality,
+    scale: resolved.scale,
   };
+}
+
+/**
+ * Resolve a video render's settings the same way, including the MP4-only
+ * fields. Video used to skip the project defaults entirely, so the fps and
+ * quality set in Settings had no effect on an MP4 render.
+ */
+export function resolveVideoOutput(
+  template: { outputDefaults?: unknown; videoDefaults?: unknown },
+  opts: VideoJobOptions | undefined,
+  global?: GlobalDefaults
+): OutputSettings {
+  const videoDefaults = (template.videoDefaults as any) || {};
+  return resolveOutputSettings(
+    // VIDEO_DEFAULT_FPS is the deployment-wide floor; anything the project,
+    // template or request says overrides it.
+    { fps: config.VIDEO_DEFAULT_FPS },
+    projectDefaultsLayer(global),
+    {
+      ...((template.outputDefaults as PartialOutputSettings) || {}),
+      fps: videoDefaults.fps,
+      durationSec: videoDefaults.durationSec,
+      videoQuality:
+        videoDefaults.crf !== undefined
+          ? crfToVideoQuality(videoDefaults.crf)
+          : undefined,
+    },
+    {
+      fps: opts?.fps,
+      durationSec: opts?.durationSec,
+      scale: opts?.scale,
+      videoQuality: opts?.quality,
+    }
+  );
 }
 
 async function fetchGlobalDefaults(projectId: string): Promise<GlobalDefaults> {
@@ -53,6 +107,8 @@ async function fetchGlobalDefaults(projectId: string): Promise<GlobalDefaults> {
       defaultFormat: projects.defaultFormat,
       defaultQuality: projects.defaultQuality,
       defaultScale: projects.defaultScale,
+      defaultFps: projects.defaultFps,
+      defaultVideoQuality: projects.defaultVideoQuality,
     })
     .from(projects)
     .where(eq(projects.id, projectId))
@@ -205,14 +261,23 @@ export async function createBatchJobs(params: {
 export interface VideoJobOptions {
   fps?: number;
   durationSec?: number;
-  quality?: "high" | "balanced" | "small";
+  quality?: VideoQualityPreset | string;
   scale?: number;
 }
 
-function videoQualityToCrf(quality?: "high" | "balanced" | "small"): number {
-  if (quality === "high") return 18;
-  if (quality === "small") return 28;
-  return 23;
+/** Apply the server-side caps (env-configurable) on top of the resolved values. */
+function cappedVideoFields(resolved: OutputSettings) {
+  return {
+    fps: Math.min(Math.max(1, Math.round(resolved.fps)), config.VIDEO_MAX_FPS),
+    durationSec: resolved.durationSec
+      ? Math.min(
+          Math.max(1, Math.ceil(resolved.durationSec)),
+          config.VIDEO_MAX_OUTPUT_SEC
+        )
+      : null,
+    crf: videoQualityToCrf(resolved.videoQuality),
+    scale: resolved.scale,
+  };
 }
 
 export async function createVideoRenderJob(params: {
@@ -229,10 +294,10 @@ export async function createVideoRenderJob(params: {
 
   const { mods, warnings: ssrfWarnings } = await sanitizeModifications(params.modifications || []);
   const { warnings: modWarnings } = applyModifications(template.designJson, mods);
-  const fps = params.output?.fps || (template.videoDefaults as any)?.fps || config.VIDEO_DEFAULT_FPS;
-  const maxFps = config.VIDEO_MAX_FPS;
-  const durationSec = params.output?.durationSec || (template.videoDefaults as any)?.durationSec;
-  const maxDuration = config.VIDEO_MAX_OUTPUT_SEC;
+  const globalDefaults = await fetchGlobalDefaults(params.projectId);
+  const video = cappedVideoFields(
+    resolveVideoOutput(template, params.output, globalDefaults)
+  );
 
   const [job] = await db
     .insert(renderJobs)
@@ -244,12 +309,12 @@ export async function createVideoRenderJob(params: {
       status: "queued",
       modifications: mods,
       format: "mp4",
-      quality: videoQualityToCrf(params.output?.quality),
-      scale: Math.min(params.output?.scale || 1, 4),
+      quality: video.crf,
+      scale: video.scale,
       outputKind: "video",
       mimeType: "video/mp4",
-      fps: Math.min(Math.max(1, Math.round(fps)), maxFps),
-      durationSec: durationSec ? Math.min(Math.max(1, Math.ceil(durationSec)), maxDuration) : null,
+      fps: video.fps,
+      durationSec: video.durationSec,
       progress: 0,
       webhookUrl: params.webhookUrl || null,
     })
@@ -258,7 +323,7 @@ export async function createVideoRenderJob(params: {
   return {
     job,
     warnings: [...ssrfWarnings, ...modWarnings],
-    resolved: { format: "mp4", quality: videoQualityToCrf(params.output?.quality), scale: params.output?.scale || 1 },
+    resolved: { format: "mp4", quality: video.crf, scale: video.scale },
   };
 }
 
@@ -274,9 +339,10 @@ export async function createVideoBatchJobs(params: {
   const batchUid = generateId("vbatch");
   const uids: string[] = [];
   const rows = [];
-  const fps = params.output?.fps || (template.videoDefaults as any)?.fps || config.VIDEO_DEFAULT_FPS;
-  const maxFps = config.VIDEO_MAX_FPS;
-  const maxDuration = config.VIDEO_MAX_OUTPUT_SEC;
+  const globalDefaults = await fetchGlobalDefaults(params.projectId);
+  const video = cappedVideoFields(
+    resolveVideoOutput(template, params.output, globalDefaults)
+  );
   for (const item of params.items) {
     const { mods } = await sanitizeModifications(item.modifications || []);
     const uid = generateId("vid");
@@ -289,16 +355,21 @@ export async function createVideoBatchJobs(params: {
       status: "queued" as const,
       modifications: mods,
       format: "mp4",
-      quality: videoQualityToCrf(params.output?.quality),
-      scale: Math.min(params.output?.scale || 1, 4),
+      quality: video.crf,
+      scale: video.scale,
       outputKind: "video",
       mimeType: "video/mp4",
-      fps: Math.min(Math.max(1, Math.round(fps)), maxFps),
-      durationSec: params.output?.durationSec ? Math.min(Math.max(1, Math.ceil(params.output.durationSec)), maxDuration) : null,
+      fps: video.fps,
+      durationSec: video.durationSec,
       progress: 0,
       webhookUrl: item.webhook_url || null,
     });
   }
   await db.insert(renderJobs).values(rows);
-  return { batchUid, uids, resolved: { format: "mp4", quality: videoQualityToCrf(params.output?.quality), scale: params.output?.scale || 1 }, templateUid: template.templateId };
+  return {
+    batchUid,
+    uids,
+    resolved: { format: "mp4", quality: video.crf, scale: video.scale },
+    templateUid: template.templateId,
+  };
 }

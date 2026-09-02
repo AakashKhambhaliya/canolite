@@ -1,7 +1,23 @@
 import { z } from "zod";
+import {
+  MAX_DURATION_SEC,
+  MAX_FPS,
+  MAX_QUALITY,
+  MAX_SCALE,
+  MIN_DURATION_SEC,
+  MIN_FPS,
+  MIN_QUALITY,
+  MIN_SCALE,
+  VIDEO_QUALITY_PRESETS,
+} from "@/lib/output-settings";
 
 /**
- * Zod schemas for v1 API input validation
+ * Zod schemas for v1 API input validation.
+ *
+ * Output bounds (quality/scale/fps/duration) come from lib/output-settings.ts
+ * rather than being written out again here — they used to disagree with the UI
+ * (scale stopped at 3 in the API and 4 in the editor), so a value the editor
+ * offered was rejected by the API.
  */
 
 export const modificationSchema = z.object({
@@ -33,8 +49,8 @@ export const renderRequestSchema = z.object({
   template_id: z.string().min(1, "template_id is required"),
   modifications: z.array(modificationSchema).optional().default([]),
   format: z.enum(["png", "jpg", "jpeg", "webp", "mp4"]).optional(),
-  quality: z.number().min(1).max(100).optional(),
-  scale: z.number().min(1).max(3).optional(),
+  quality: z.number().min(MIN_QUALITY).max(MAX_QUALITY).optional(),
+  scale: z.number().min(MIN_SCALE).max(MAX_SCALE).optional(),
   webhook_url: z.string().url().optional(),
   // When true, the request waits for the render to finish and returns the
   // image_url directly instead of a queued job uid to poll.
@@ -44,9 +60,12 @@ export const renderRequestSchema = z.object({
 export const videoRenderRequestSchema = z.object({
   template_id: z.string().min(1, "template_id is required"),
   modifications: z.array(modificationSchema).optional().default([]),
-  fps: z.number().min(1).max(60).optional(),
-  duration: z.number().min(0.1).max(120).optional(),
-  quality: z.enum(["high", "balanced", "small"]).optional(),
+  fps: z.number().min(MIN_FPS).max(MAX_FPS).optional(),
+  duration: z.number().min(MIN_DURATION_SEC).max(MAX_DURATION_SEC).optional(),
+  quality: z.enum(VIDEO_QUALITY_PRESETS).optional(),
+  // Video renders honour scale like image renders do; it was accepted by
+  // createVideoRenderJob but had no way in through the public API.
+  scale: z.number().min(MIN_SCALE).max(MAX_SCALE).optional(),
   webhook_url: z.string().url().optional(),
 });
 
@@ -62,8 +81,8 @@ export const batchRequestSchema = z.object({
     .min(1, "At least one item is required")
     .max(500, "Maximum 500 items per batch"),
   format: z.enum(["png", "jpg", "jpeg", "webp", "mp4"]).optional(),
-  quality: z.number().min(1).max(100).optional(),
-  scale: z.number().min(1).max(3).optional(),
+  quality: z.number().min(MIN_QUALITY).max(MAX_QUALITY).optional(),
+  scale: z.number().min(MIN_SCALE).max(MAX_SCALE).optional(),
 });
 
 /**
@@ -109,8 +128,26 @@ export const settingsSchema = z.object({
   webhookUrl: z.union([z.string().url(), z.literal("")]).optional(),
   webhookSecret: z.string().optional(),
   defaultFormat: z.enum(["png", "jpg", "jpeg", "webp", "mp4"]).optional(),
-  defaultQuality: z.coerce.number().min(1).max(100).optional(),
-  defaultScale: z.coerce.number().min(1).max(3).optional(),
+  defaultQuality: z.coerce.number().min(MIN_QUALITY).max(MAX_QUALITY).optional(),
+  defaultScale: z.coerce.number().min(MIN_SCALE).max(MAX_SCALE).optional(),
+  // Video defaults live alongside the image ones so a single Settings screen
+  // covers every render the app can make.
+  defaultFps: z.coerce.number().min(MIN_FPS).max(MAX_FPS).optional(),
+  defaultVideoQuality: z.enum(VIDEO_QUALITY_PRESETS).optional(),
+  retentionHours: z.coerce.number().min(1).max(8760).optional(),
+});
+
+/**
+ * POST /api/cleanup body.
+ *
+ * `scope: "retention"` sweeps everything past the retention period (what the
+ * hourly job does); `scope: "all"` is the explicit "delete every render now"
+ * the Settings page offers, which is what people reach for when the retention
+ * sweep correctly finds nothing to do. `retentionHours` lets the form apply the
+ * period currently shown on screen without having to Save first.
+ */
+export const cleanupRequestSchema = z.object({
+  scope: z.enum(["retention", "all"]).optional().default("retention"),
   retentionHours: z.coerce.number().min(1).max(8760).optional(),
 });
 

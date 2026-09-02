@@ -67,9 +67,15 @@ export const projects = pgTable("projects", {
     .notNull(),
   webhookUrl: text("webhook_url"),
   webhookSecret: text("webhook_secret"),
+  // Universal output defaults. Every surface (Settings, editor, Playground,
+  // v1 API) resolves against these — see lib/output-settings.ts.
   defaultFormat: varchar("default_format", { length: 10 }).default("png"),
   defaultQuality: integer("default_quality").default(90),
   defaultScale: integer("default_scale").default(1),
+  defaultFps: integer("default_fps").default(30),
+  defaultVideoQuality: varchar("default_video_quality", { length: 10 }).default(
+    "balanced"
+  ),
   retentionHours: integer("retention_hours").default(24),
   createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),

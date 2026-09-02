@@ -32,7 +32,14 @@ export async function POST(request: Request) {
         projectId: user.projectId,
         templateId: template_id,
         modifications,
-        output: { fps: body.fps, durationSec: body.duration, quality: body.videoQuality || body.qualityPreset },
+        output: {
+          fps: body.fps,
+          durationSec: body.duration,
+          quality: body.videoQuality || body.qualityPreset,
+          // Scale was dropped here, so an MP4 exported at 2x from the editor
+          // silently rendered at 1x.
+          scale,
+        },
       });
       if (!created) return NextResponse.json({ error: "Template not found" }, { status: 404 });
       void processVideoJob(created.job.uid);
