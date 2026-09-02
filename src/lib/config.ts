@@ -1,3 +1,4 @@
+import os from "os";
 import { z } from "zod";
 
 const intFromEnv = (fallback: number) =>
@@ -5,6 +6,9 @@ const intFromEnv = (fallback: number) =>
 
 const numberFromEnv = (fallback: number) =>
   z.preprocess((value) => (value === undefined || value === "" ? fallback : value), z.coerce.number());
+
+const stringFromEnv = (fallback: string) =>
+  z.preprocess((value) => (value === undefined || value === "" ? fallback : value), z.string());
 
 const envSchema = z.object({
   MAX_UPLOAD_MB: intFromEnv(10),
@@ -21,6 +25,9 @@ const envSchema = z.object({
   VIDEO_PROBE_TIMEOUT_MS: intFromEnv(60_000),
   VIDEO_POSTER_TIMEOUT_MS: intFromEnv(60_000),
   VIDEO_DECODE_TIMEOUT_MS: intFromEnv(300_000),
+  // Fast-path renderer tuning (docs/video-rendering.md).
+  VIDEO_FFMPEG_LOOP_MEMORY_MB: intFromEnv(512),
+  VIDEO_ENCODER: stringFromEnv("libx264"),
 });
 
 export const config = envSchema.parse(process.env);

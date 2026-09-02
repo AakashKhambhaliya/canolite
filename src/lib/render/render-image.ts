@@ -226,6 +226,7 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
        <base href="${base}/">
        <style>html,body{margin:0;padding:0;background:#fff}</style>
        ${fontHead}
+       <script>/* Identity shim: source stringified into page.evaluate may come from an esbuild-based runner (tsx) that decorates functions with __name(); production builds never do. */window.__name = window.__name || (function (f) { return f; });</script>
        <script>${fabric}</script></head>
        <body><canvas id="c"></canvas></body></html>`,
       { waitUntil: "load" }

@@ -47,6 +47,79 @@ export function spawnFfmpegPipe(args: string[]): ChildProcessWithoutNullStreams 
   return spawn(getFfmpegPath(), args, { stdio: ["pipe", "pipe", "pipe"] });
 }
 
+export interface RunFfmpegProgressOptions extends RunFfmpegOptions {
+  /** Expected output duration in seconds, for -progress fraction mapping. */
+  totalSec?: number;
+  /** Called with encode progress as a 0..1 fraction (throttling is the caller's job). */
+  onProgress?: (fraction: number) => void;
+}
+
+/**
+ * Run ffmpeg with `-progress pipe:1` style output expected on stdout (the
+ * caller appends those flags; this runner only parses them). ffmpeg prints
+ * key=value lines; out_time_us/out_time_ms are both in microseconds (the
+ * _ms variant is a long-standing misnomer), with out_time as a fallback.
+ */
+export function runFfmpegWithProgress(args: string[], options: RunFfmpegProgressOptions = {}): Promise<void> {
+  const binary = getFfmpegPath();
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+
+    let stderr = "";
+    let stdoutBuf = "";
+    let timedOut = false;
+    const timer = options.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, options.timeoutMs)
+      : null;
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    const emitProgress = () => {
+      if (!options.onProgress || !options.totalSec || options.totalSec <= 0) return;
+      const match = stdoutBuf.match(/out_time_us=(-?\d+)/) || stdoutBuf.match(/out_time_ms=(-?\d+)/);
+      let seconds: number | null = null;
+      if (match) {
+        seconds = Number(match[1]) / 1e6;
+      } else {
+        const time = stdoutBuf.match(/out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/);
+        if (time) seconds = Number(time[1]) * 3600 + Number(time[2]) * 60 + Number(time[3]);
+      }
+      if (seconds === null || !Number.isFinite(seconds)) return;
+      options.onProgress(Math.min(1, Math.max(0, seconds / options.totalSec)));
+    };
+
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuf = (stdoutBuf + chunk).slice(-8192);
+      emitProgress();
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+      options.onStderr?.(chunk);
+    });
+
+    child.on("error", (error) => {
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code, signal) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut && options.timeoutMs) return reject(new Error(timeoutMessage(binary, options.timeoutMs)));
+      if (code === 0) return resolve();
+      reject(
+        new Error(
+          `${binary} failed${code !== null ? ` with exit code ${code}` : ""}${signal ? ` (signal ${signal})` : ""}` +
+            (stderr.trim() ? `: ${stderr.trim().slice(-4000)}` : "")
+        )
+      );
+    });
+  });
+}
+
+
 function timeoutMessage(binary: string, timeoutMs: number): string {
   return `${binary} timed out after ${timeoutMs}ms`;
 }
