@@ -237,6 +237,7 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
       crf: ctx.crf,
       audioLayers: decoded.filter((d) => d.audioPath),
       frameFormat: "jpeg",
+      encoder: ctx.encoder,
     });
     let encoderStderr = "";
     encoder.stderr.setEncoding("utf8");

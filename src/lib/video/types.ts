@@ -1,5 +1,6 @@
 import type { CustomFontRef } from "@/lib/render/render-image";
 import type { Timeline } from "./timeline";
+import type { VideoEncoder } from "./encode";
 
 /** Public options for a video render — unchanged by the renderer work. */
 export interface RenderVideoOptions {
@@ -44,6 +45,8 @@ export interface PreparedVideoRender {
   evenHeight: number;
   timeline: Timeline;
   crf: number;
+  /** Resolved from VIDEO_ENCODER; libx264 unless the host opts in. */
+  encoder: VideoEncoder;
   /** Absolute path of the per-render scratch directory (already created). */
   tmpDir: string;
   /** Accumulates non-fatal notices surfaced on the render job. */

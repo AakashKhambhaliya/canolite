@@ -22,6 +22,7 @@ import type { CustomFontRef } from "@/lib/render/render-image";
 import { buildTimeline } from "./timeline";
 import { auditVideoObjects, loopCacheWithinBudget } from "./simple-template";
 import { qualityToCrf, type RenderVideoOptions, type RenderVideoResult, type PreparedVideoRender } from "./types";
+import { resolveVideoEncoder } from "./encode";
 import { renderVideoWithChromium } from "./render-video-chromium";
 import { renderVideoWithFfmpeg } from "./render-video-ffmpeg";
 
@@ -133,6 +134,7 @@ async function renderVideoInner(
       evenHeight,
       timeline,
       crf: qualityToCrf(opts.quality),
+      encoder: resolveVideoEncoder(),
       tmpDir,
       warnings,
       onProgress: opts.onProgress,

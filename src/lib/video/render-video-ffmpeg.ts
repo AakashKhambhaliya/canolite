@@ -200,7 +200,7 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
     fps: timeline.fps,
     durationSec: timeline.durationSec,
     crf: ctx.crf,
-    encoder: "libx264",
+    encoder: ctx.encoder,
     outputPath: outPath,
     progress: true,
   });
