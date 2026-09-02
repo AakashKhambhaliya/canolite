@@ -4,6 +4,74 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.11.0
+
+**One set of output settings, everywhere.**
+
+Format, quality and scale existed four separate times — on the Settings page,
+in the editor's Output popover, in the editor's Export dialog and in the
+Playground — each with its own defaults and its own option list. Scale stopped
+at 3x in some of them and 4x in others, MP4 quality meant a 1-100 number in one
+place and a preset in another, and changing a default in Settings changed
+nothing anywhere else: the Playground always started from its own hard-coded
+PNG/90/1x, and Export always from PNG/100/2x.
+
+There is now one definition of what an output is (`lib/output-settings.ts`) and
+one form component that every screen renders, including the bulk CSV import.
+The precedence chain is the same everywhere and is applied by the same code on
+the client and the server: **global defaults → template overrides → this
+request**. A field left blank inherits, and the UI says what it will inherit.
+
+Settings also covers video now — frame rate and video quality sit alongside the
+image defaults, and MP4 renders honour them. Previously an MP4 ignored the
+project defaults entirely, and `scale` never reached a video render at all: an
+MP4 exported at 2x from the editor silently came out at 1x.
+
+**Renders show how long they take, and how long they will take.**
+
+Every finished job already recorded its duration; nothing ever read it back.
+`GET /api/renders/stats` now turns that history into per-project (and
+per-template) medians, scaled by output megapixels and, for video, by frame
+count — so switching from 1x to 4x moves the prediction the way the real render
+does.
+
+- The **Playground** shows an estimate before you generate, a live
+  elapsed/remaining readout while it runs, and what it actually took.
+- **Renders** shows the typical time for the project, the measured time on each
+  finished row, and elapsed-plus-remaining on anything still running. Video
+  jobs switch to their own reported progress once they are past a few percent.
+- The editor's **Output panel** estimates a server render; the **Export dialog**
+  estimates only MP4, since the image formats are drawn locally and finish
+  immediately.
+- **Bulk CSV** estimates the whole batch at the server's render concurrency,
+  rather than leaving you to multiply.
+
+**Manual cleanup now does something.**
+
+"Clean Now" only ever deleted renders past the retention period, so on a
+project whose renders were all newer than that it deleted nothing and reported
+"Cleaned up 0 old renders" — indistinguishable from a broken button. Settings
+now shows how many renders are stored and how many are actually past the
+period, explains when a sweep will do nothing, and offers **Delete All** for
+clearing everything immediately (files included). "Clean Now" also applies the
+retention period currently shown in the form, so it no longer requires a save
+first.
+
+**Retention deleted at the wrong time outside UTC.** `render_jobs.created_at`
+is filled in by PostgreSQL's own clock in a `timestamp without time zone`
+column, but the sweep compared it against a cutoff computed in JavaScript and
+sent as UTC. The two sides were on different clocks: on UTC+5:30 every render
+survived 5.5 hours past its retention period, and west of UTC renders were
+deleted early. The cutoff is now computed by the database.
+
+**Also**
+
+- `GET /api/renders` returns the template's name and id, so the Renders search
+  box can finally match on template name — it always filtered on a field the
+  API never sent.
+- `POST /v1/videos` and `/v1/videos/batch` accept `scale`.
+- The API accepts `scale` up to 4, matching what the editor has always offered.
+
 ## v1.10.0
 
 **Video renders are 10–50× faster on typical templates.**

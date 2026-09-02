@@ -19,8 +19,9 @@
 - 🎯 **Playground** — Interactive template testing with live API request preview
 - 📄 **Auto-generated API Docs** — Per-template documentation with copy-paste code examples
 - 🪝 **Webhooks** — Get notified when renders complete or fail
-- 📈 **Render Logs** — Track, retry, and delete renders
-- ⚙️ **Per-project defaults** — Default format/quality/scale + configurable **render retention** with automatic cleanup
+- 📈 **Render Logs** — Track, retry, and delete renders, with the time each one took
+- ⏱️ **Render-time estimates** — Every screen that starts a render says how long it is likely to take, measured from this project's own history
+- ⚙️ **Universal output settings** — One place sets format/quality/scale/fps/video quality for the editor, Playground, bulk CSV and API; templates and single requests can still override. Plus configurable **render retention** with automatic cleanup and a manual purge
 - 🔒 **Single-admin auth** — One-time setup wizard, no public sign-up
 - 🔄 **Self-update checker** — One-click updates (git self-update, or Coolify redeploy)
 - ⚡ **Runs without Docker** — `npm run setup` and it's up: embedded PostgreSQL + local storage, no `.env` and no external services. Or point it at an external **PostgreSQL**
