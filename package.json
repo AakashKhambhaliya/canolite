@@ -17,7 +17,9 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:backup": "tsx src/db/backup.ts",
     "worker": "tsx src/queue/worker.ts",
-    "test": "tsx tests/unit/test-all.ts"
+    "test": "npm run test:unit",
+    "test:unit": "tsx tests/unit/test-all.ts && tsx tests/unit/test-video-fast-path.ts && tsx tests/unit/test-ordered-frame-pipeline.ts",
+    "test:comparison": "tsx tests/comparison/compare-paths.ts"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.2",

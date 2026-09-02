@@ -108,13 +108,16 @@ export function overlayPixelPosition(
   outputScale: number
 ): { x: number; y: number } {
   const { w, h } = layerBoxSize(layer, outputScale);
+  // All math in scaled output pixels. Fabric anchors the box per originX/
+  // originY at (left, top): "left"/"top" anchor the box's top-left corner
+  // (Fabric's default), "center" its center, "right"/"bottom" its far edges.
+  const left = geometry.left * outputScale;
+  const top = geometry.top * outputScale;
   const originX = geometry.originX || "left";
   const originY = geometry.originY || "top";
-  const offsetX = originX === "center" ? 0 : originX === "right" ? -w / 2 : w / 2;
-  const offsetY = originY === "center" ? 0 : originY === "bottom" ? -h / 2 : h / 2;
-  const centerX = (geometry.left + offsetX) * outputScale;
-  const centerY = (geometry.top + offsetY) * outputScale;
-  return { x: Math.round(centerX - w / 2), y: Math.round(centerY - h / 2) };
+  const x = originX === "center" ? left - w / 2 : originX === "right" ? left - w : left;
+  const y = originY === "center" ? top - h / 2 : originY === "bottom" ? top - h : top;
+  return { x: Math.round(x), y: Math.round(y) };
 }
 
 function layerSpanSec(layer: VideoLayer): number {
@@ -132,6 +135,9 @@ export function enableWindowSec(
   durationSec: number
 ): { start: number; end: number } | null {
   const start = Math.max(0, layer.startAt);
+  // A layer that starts at/after the end of the timeline is never visible;
+  // treating it as dead keeps its source closed.
+  if (start >= durationSec) return null;
   if (layer.loop) return { start, end: Math.max(start, durationSec) };
   const span = layerSpanSec(layer);
   if (span <= 0) return null;
@@ -182,17 +188,14 @@ export function buildVideoChainFilters(params: {
 
   const { w, h } = layerBoxSize(layer, outputScale);
   const parts: string[] = [];
-  // Input -ss leaves small non-zero starting timestamps; normalize to 0 (and
-  // apply playbackRate at the same time). Retime BEFORE fps: fps then
-  // resamples the retimed stream at the output rate, so rate>1 skips source
-  // frames and rate<1 holds them — the same sampling sourceTimeForFrame()
-  // performs when the legacy renderer picks decoded frames.
-  parts.push(
-    layer.playbackRate === 1
-      ? "setpts=PTS-STARTPTS"
-      : `setpts=(PTS-STARTPTS)/${fmtNumber(layer.playbackRate)}`
-  );
+  // Phase-match decode.ts: the legacy path decodes with `-ss trimStart` then
+  // `fps` applied to the RAW (seek-shifted) timestamps, so the resampled
+  // frames land on the same phase here. fps BEFORE the rate division also
+  // resamples at the output rate, so rate>1 skips source frames and rate<1
+  // holds them — the same sampling sourceTimeForFrame() performs when the
+  // legacy renderer picks decoded frames.
   parts.push(`fps=${fmtNumber(fps)}`);
+  if (layer.playbackRate !== 1) parts.push(`setpts=PTS/${fmtNumber(layer.playbackRate)}`);
   parts.push(fitFilterExpr(layer.fit, w, h));
   const opacity = geometry.opacity;
   if (opacity < 1 - 1e-6) parts.push(`format=rgba,colorchannelmixer=aa=${fmtNumber(opacity)}`);

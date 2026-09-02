@@ -20,9 +20,9 @@ import { storageFilePath } from "@/lib/storage";
 import { prepareDesignForRender } from "@/lib/render/prepare-design";
 import type { CustomFontRef } from "@/lib/render/render-image";
 import { buildTimeline } from "./timeline";
-import { auditVideoObjects, loopCacheWithinBudget } from "./simple-template";
 import { qualityToCrf, type RenderVideoOptions, type RenderVideoResult, type PreparedVideoRender } from "./types";
 import { resolveVideoEncoder } from "./encode";
+import { chooseRenderer } from "./renderer-choice";
 import { renderVideoWithChromium } from "./render-video-chromium";
 import { renderVideoWithFfmpeg } from "./render-video-ffmpeg";
 
@@ -68,10 +68,8 @@ export async function renderVideoToBuffer(opts: RenderVideoOptions): Promise<Ren
 }
 
 /**
- * Test/driver entry point: run the renderer selection against an
- * already-prepared design (images inlined) without touching the asset
- * database. `renderVideoToBuffer` is the production wrapper that prepares a
- * raw design first.
+ * Test/driver entry point: run the dispatcher against an already-prepared
+ * design (images inlined) without touching the asset database.
  */
 export async function renderVideoToBufferPrepared(
   opts: RenderVideoOptions,
@@ -105,16 +103,16 @@ async function renderVideoInner(
   // Decide the renderer ONCE, before any work: simple templates (axis-aligned,
   // constant-opacity video layers at root level, loop caches within budget)
   // go to the ffmpeg filter graph; everything else keeps the Chromium loop.
-  const forceLegacy = process.env.VIDEO_FORCE_LEGACY_RENDERER === "1";
-  const facts = auditVideoObjects(renderJson);
-  const loopBudgetOk = loopCacheWithinBudget(timeline.layers, timeline.fps, outputScale);
-  const useFfmpeg = !forceLegacy && facts.audit.simple && loopBudgetOk;
-  const reason = !loopBudgetOk
-    ? "a looping layer exceeds VIDEO_FFMPEG_LOOP_MEMORY_MB"
-    : facts.audit.reasons[0];
+  const { renderer, reason } = chooseRenderer(renderJson, {
+    layers: timeline.layers,
+    fps: timeline.fps,
+    outputScale,
+    forceLegacy: process.env.VIDEO_FORCE_LEGACY_RENDERER === "1",
+  });
+  const useFfmpeg = renderer === "ffmpeg";
   console.log(
     `[video] ${opts.uid}: renderer=${useFfmpeg ? "ffmpeg (fast path)" : "chromium (legacy)"}` +
-      `${forceLegacy ? " (forced by VIDEO_FORCE_LEGACY_RENDERER)" : useFfmpeg ? "" : ` (legacy: ${reason})`}`
+      `${reason ? ` (${reason})` : ""}`
   );
 
   const tmpDir = storageFilePath(`tmp/${opts.uid}`);
