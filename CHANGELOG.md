@@ -4,6 +4,94 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.10.0
+
+**Video renders are 10–50× faster on typical templates.**
+
+Between two output frames of a video render, only the video layers actually
+change — the text, images and shapes around them are identical for the whole
+duration. The renderer used to ignore that and repaint every frame in
+Chromium, so a 30-second clip meant 900 full canvas snapshots crossing the
+browser bridge.
+
+Templates that qualify now render in a single ffmpeg pass. Chromium paints the
+static objects once, and one filter graph overlays the video layers on top of
+them with the same fit, trim, loop, playback-rate and audio behaviour as
+before. Nothing about a template changes and no setting turns this on — it is
+chosen per render.
+
+Templates only take that path when it can reproduce the old output exactly:
+video layers must be axis-aligned rectangles at the top level with constant
+opacity and no rotation, clip path, skew, flip, mirror, shadow, stroke or
+Fabric image filters. Anything else — rotated text over video, a clipped or
+shadowed clip, a video inside a group — keeps the frame-by-frame renderer,
+which can draw everything Fabric can. `VIDEO_FORCE_LEGACY_RENDERER=1` pins
+every render to it, and each render logs which path it took and why.
+
+**The frame-by-frame path got faster too.**
+
+For templates that still need it, frames are now painted by several Chromium
+pages at once (`VIDEO_FRAME_WORKERS`, default = CPU count) and handed to the
+encoder strictly in order, with back-pressure bounding how many finished
+frames can pile up. Frames also cross as JPEG rather than PNG — the encode
+target has no alpha to preserve and the payload is roughly 10× smaller.
+
+**Hardware video encoders.**
+
+`VIDEO_ENCODER` selects `h264_nvenc`, `h264_vaapi` or `h264_videotoolbox`
+instead of the default `libx264`, on both render paths. The bundled ffmpeg is
+CPU-only, so hardware encoders need a system ffmpeg via `FFMPEG_PATH` — see
+[docs/video-rendering.md](docs/video-rendering.md), which documents both paths,
+the detector rules and the encoder setup.
+
+### Fixes
+
+- **A rendered MP4 would not play or download from its direct link.** The
+  script-blocking CSP meant for uploaded SVGs was applied to every stored
+  file. Navigating straight to a media file makes the browser synthesise a
+  document around a `<video>`, and that CSP governs it — `default-src 'none'`
+  implies `media-src 'none'`, so the player rendered black and stuck at 0:00,
+  while `sandbox` without `allow-downloads` blocked saving the file. The CSP
+  is now scoped to `.svg`, the only stored format that can execute anything.
+- **Seeking a stored video did nothing, and large clips were slow to start.**
+  The `/storage` route ignored Range requests, answering every one with the
+  whole file and no `Accept-Ranges`. Ranges are now honoured (206 with
+  `Content-Range`, 416 when unsatisfiable) and responses stream from disk
+  instead of being read into memory in full on every request. Both faults were
+  invisible in local development: they only affect installs with
+  `STORAGE_DIR` set, which is every Docker deploy.
+- **An interrupted render sat at "processing, 1%" forever.** Renders run
+  in-process, so a restart killed the work while the job row — the only
+  durable record — kept whatever progress was written when it was created.
+  The retention sweep skips rows with no `completedAt`, so they never expired
+  and anything polling one waited on a render that no longer existed. Such
+  rows are now failed at boot with a message telling the caller to resubmit.
+- **Progress was a black hole before the first encoded frame.** Nothing
+  reported during image inlining, frame extraction (a five-minute timeout per
+  layer) or a cold Chromium launch — minutes pinned at 1% on a slow host,
+  indistinguishable from a wedged job. Decoding now reports up to 12%, loading
+  the design 15%, and encoding spans 15–99%.
+- **A Coolify redeploy kept running the old image.**
+  `docker-compose.coolify.yml` pins the moving `latest` tag but set no pull
+  policy, and Compose only pulls when the tag is absent locally. A host that
+  had deployed once re-ran its cached copy forever — seen in the wild still on
+  1.7.0 after 1.9.0 shipped. `pull_policy: always` re-resolves the tag on
+  every deploy. Not applied to `docker-compose.yml`, which also declares
+  `build: .`; combining the two makes Compose fail instead of falling back to
+  a local build, so that file documents `docker compose pull` instead.
+
+### Configuration
+
+All optional — every one has a working default.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `VIDEO_FORCE_LEGACY_RENDERER` | unset | `1` pins every render to the frame-by-frame path. |
+| `VIDEO_FRAME_WORKERS` | CPU count | Parallel Chromium pages painting frames on that path. |
+| `VIDEO_FFMPEG_LOOP_MEMORY_MB` | `512` | Loop-cache budget; looping layers above it use the frame-by-frame path. |
+| `VIDEO_ENCODER` | `libx264` | `libx264`, `h264_nvenc`, `h264_vaapi` or `h264_videotoolbox`. |
+| `VAAPI_DEVICE` | `/dev/dri/renderD128` | Render node used by `h264_vaapi`. |
+
 ## v1.9.0
 
 **Video layers play in the editor.**
