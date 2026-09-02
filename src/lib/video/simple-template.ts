@@ -38,16 +38,19 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-/** Structural checks that don't depend on the timeline. */
-function auditVideoObject(obj: any, path: string, reasons: string[], inGroup: boolean): void {
-  const label = obj.name || obj.id || path;
+/** How a layer is named in a rejection reason. */
+function labelOf(obj: any, path: string): string {
+  return obj.name || obj.id || path;
+}
 
-  // A video nested inside a (possibly transformed) group: Fabric group
-  // children use group-local coordinates, which the filter graph's absolute
-  // overlay positions cannot express. Conservative → legacy path.
-  if (inGroup) {
-    reasons.push(`${label}: video layer is nested inside a group`);
-  }
+/**
+ * Structural checks that don't depend on the timeline. Nesting is rejected by
+ * the caller (a video nested inside a possibly-transformed group uses
+ * group-local coordinates, which the filter graph's absolute overlay
+ * positions cannot express), so everything here is root-level.
+ */
+function auditVideoObject(obj: any, path: string, reasons: string[]): void {
+  const label = labelOf(obj, path);
 
   const angle = normalizeAngle(obj.angle);
   if (angle !== 0) reasons.push(`${label}: angle ${angle}° is not supported by the filter graph`);
@@ -118,9 +121,19 @@ export function auditVideoObjects(designJson: any): VideoObjectFacts {
       const objPath = path ? `${path}.${i}` : `${i}`;
       if (isImage(obj) && obj.mediaType === "video" && obj.videoSrc) {
         count += 1;
+        // Nesting disqualifies the fast path even for a hidden layer.
+        // collectVideoLayers() walks into groups, so a nested video still
+        // occupies a timeline slot, while the fast path pairs those slots
+        // with ROOT-level objects only. Letting a hidden nested video skip
+        // this check made the renderer choose the fast path and then abort
+        // the whole render on the slot/layer mismatch.
+        if (inGroup) {
+          reasons.push(`${labelOf(obj, objPath)}: video layer is nested inside a group`);
+          continue;
+        }
         // visible:false never paints in either path — nothing to audit or overlay.
         if (obj.visible === false) continue;
-        auditVideoObject(obj, objPath, reasons, inGroup);
+        auditVideoObject(obj, objPath, reasons);
         overlayCandidates.push(obj);
       }
       if (Array.isArray(obj?.objects)) walk(obj.objects, objPath, true);

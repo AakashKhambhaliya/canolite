@@ -154,6 +154,10 @@ console.log("1. simple-template detector\n");
     "video nested in a group forces the legacy path"
   );
   assert(
+    !auditVideoObjects({ objects: [{ type: "group", objects: [videoObject({ visible: false })] }] }).audit.simple,
+    "a HIDDEN video nested in a group still forces the legacy path"
+  );
+  assert(
     auditVideoObjects({ objects: [videoObject({ visible: false, angle: 42 })] }).audit.simple,
     "an invisible video object is skipped by the audit"
   );
