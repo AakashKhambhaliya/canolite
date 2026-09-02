@@ -25,6 +25,8 @@ const envSchema = z.object({
   VIDEO_PROBE_TIMEOUT_MS: intFromEnv(60_000),
   VIDEO_POSTER_TIMEOUT_MS: intFromEnv(60_000),
   VIDEO_DECODE_TIMEOUT_MS: intFromEnv(300_000),
+  // Legacy-path renderer tuning (docs/video-rendering.md).
+  VIDEO_FRAME_WORKERS: intFromEnv(Math.max(1, os.cpus().length)),
   // Fast-path renderer tuning (docs/video-rendering.md).
   VIDEO_FFMPEG_LOOP_MEMORY_MB: intFromEnv(512),
   VIDEO_ENCODER: stringFromEnv("libx264"),

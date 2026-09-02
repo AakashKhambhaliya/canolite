@@ -9,6 +9,12 @@ export interface VideoEncodeOptions {
   fps: number;
   crf: number;
   audioLayers: DecodedLayer[];
+  /**
+   * Pixel format of the frames piped on stdin. "jpeg" (MJPEG) is ~10× less
+   * data than PNG and decodes far faster; the H.264 output is yuv420p either
+   * way, so no alpha is ever needed.
+   */
+  frameFormat?: "png" | "jpeg";
 }
 
 /**
@@ -38,11 +44,9 @@ export function buildEncodeArgs(opts: VideoEncodeOptions): string[] {
     "error",
     "-f",
     "image2pipe",
-    "-framerate",
-    String(opts.fps),
-    "-i",
-    "-",
   ];
+  if (opts.frameFormat === "jpeg") args.push("-c:v", "mjpeg");
+  args.push("-framerate", String(opts.fps), "-i", "-");
 
   const audioEntries = [] as Parameters<typeof buildAudioMixFilters>[0];
   opts.audioLayers.forEach((decoded, idx) => {
