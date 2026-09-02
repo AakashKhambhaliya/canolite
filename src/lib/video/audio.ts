@@ -30,7 +30,8 @@ export function buildAudioMixFilters(
   const filters: string[] = [];
   entries.forEach((entry, idx) => {
     const delayMs = Math.max(0, Math.round(entry.startAtSec * 1000));
-    const volume = Math.max(0, entry.volume || 1);
+    // No `|| 1` here: volume 0 is a legitimate (silent) value, not a default.
+    const volume = Number.isFinite(entry.volume) ? Math.max(0, entry.volume) : 1;
     filters.push(`[${entry.inputIndex}:a]adelay=${delayMs}|${delayMs},volume=${volume}[a${idx}]`);
   });
   // padToSec (fast path): extend the mix with silence until the output

@@ -80,13 +80,19 @@ export function runFfmpegWithProgress(args: string[], options: RunFfmpegProgress
 
     const emitProgress = () => {
       if (!options.onProgress || !options.totalSec || options.totalSec <= 0) return;
-      const match = stdoutBuf.match(/out_time_us=(-?\d+)/) || stdoutBuf.match(/out_time_ms=(-?\d+)/);
+      // The buffer holds MANY progress lines — always take the LAST match,
+      // never the first (which is up to a buffer's worth of time stale).
+      const usMatches = [...stdoutBuf.matchAll(/out_time_us=(-?\d+)/g)];
+      const msMatches = usMatches.length > 0 ? [] : [...stdoutBuf.matchAll(/out_time_ms=(-?\d+)/g)];
+      const timeMatches = usMatches.length + msMatches.length > 0 ? [] : [...stdoutBuf.matchAll(/out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
       let seconds: number | null = null;
-      if (match) {
-        seconds = Number(match[1]) / 1e6;
-      } else {
-        const time = stdoutBuf.match(/out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/);
-        if (time) seconds = Number(time[1]) * 3600 + Number(time[2]) * 60 + Number(time[3]);
+      if (usMatches.length > 0) {
+        seconds = Number(usMatches[usMatches.length - 1][1]) / 1e6;
+      } else if (msMatches.length > 0) {
+        seconds = Number(msMatches[msMatches.length - 1][1]) / 1e6;
+      } else if (timeMatches.length > 0) {
+        const t = timeMatches[timeMatches.length - 1];
+        seconds = Number(t[1]) * 3600 + Number(t[2]) * 60 + Number(t[3]);
       }
       if (seconds === null || !Number.isFinite(seconds)) return;
       options.onProgress(Math.min(1, Math.max(0, seconds / options.totalSec)));

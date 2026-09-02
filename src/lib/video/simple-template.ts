@@ -153,17 +153,3 @@ export function loopCacheWithinBudget(layers: VideoLayer[], fps: number, outputS
   }
   return true;
 }
-
-/**
- * True when every video object can be composited by the ffmpeg filter graph:
- * structurally simple (see auditVideoObjects) and, for looping layers, the
- * loop cache stays inside the configured memory budget.
- */
-export function isSimpleVideoTemplate(
-  designJson: any,
-  opts: { layers: VideoLayer[]; fps: number; outputScale: number }
-): boolean {
-  const { audit } = auditVideoObjects(designJson);
-  if (!audit.simple) return false;
-  return loopCacheWithinBudget(opts.layers, opts.fps, opts.outputScale);
-}

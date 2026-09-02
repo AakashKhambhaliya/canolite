@@ -39,21 +39,52 @@ export function resolveVideoEncoder(): VideoEncoder {
   return DEFAULT_VIDEO_ENCODER;
 }
 
+/** True when the encoder consumes VA-API hardware surfaces. */
+export function isVaapiEncoder(encoder: VideoEncoder): boolean {
+  return encoder === "h264_vaapi";
+}
+
+/**
+ * The documented software-frames → VA-API recipe: create the device, convert
+ * to NV12, and upload to hardware before the encoder sees the frames.
+ */
+export function vaapiDeviceArgs(): string[] {
+  return ["-vaapi_device", config.VAAPI_DEVICE];
+}
+
+export const VAAPI_UPLOAD_FILTER = "format=nv12,hwupload";
+
+/**
+ * Map the CRF dial (12 best … 35 worst) onto VideoToolbox's 1–100 quality.
+ */
+export function videotoolboxQuality(crf: number): number {
+  const q = Math.round(((35 - Math.min(35, Math.max(12, crf))) / 23) * 100);
+  return Math.min(100, Math.max(1, q));
+}
+
 /**
  * Codec settings shared by the legacy pipe encoder and the fast-path filter
  * graph, so both paths produce equivalent H.264 output. `crf` maps to each
- * encoder's quality dial (CRF / CQ / QP).
+ * encoder's quality dial (CRF / CQ / QP). VA-API additionally needs the
+ * device + hwupload plumbing (see vaapiDeviceArgs / VAAPI_UPLOAD_FILTER).
  */
 export function buildVideoCodecArgs(encoder: VideoEncoder, crf: number): string[] {
   switch (encoder) {
     case "h264_nvenc":
-      return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", String(crf)];
+      // -b:v 0 makes -cq actually govern the quality (NVENC's VBR ignores it
+      // otherwise in several driver builds).
+      return ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", String(crf), "-b:v", "0"];
     case "h264_vaapi":
       return ["-c:v", "h264_vaapi", "-qp", String(crf)];
     case "h264_videotoolbox":
-      return ["-c:v", "h264_videotoolbox", "-q:v", String(crf)];
+      return ["-c:v", "h264_videotoolbox", "-q:v", String(videotoolboxQuality(crf))];
     case "libx264":
       return ["-c:v", "libx264", "-preset", "veryfast", "-crf", String(crf)];
+    default: {
+      // Unreachable via the type system; fail loudly rather than emit a
+      // command with a missing codec section.
+      throw new Error(`Unsupported video encoder: ${String(encoder)}`);
+    }
   }
 }
 
@@ -79,6 +110,8 @@ export function buildEncodeArgs(opts: VideoEncodeOptions): string[] {
     });
   });
 
+  if (opts.encoder && isVaapiEncoder(opts.encoder)) args.push(...vaapiDeviceArgs());
+
   const audio = buildAudioMixFilters(audioEntries);
   if (audio.filters.length > 0) {
     args.push("-filter_complex", audio.filters.join(";"), "-map", "0:v", "-map", audio.outputLabel);
@@ -86,12 +119,14 @@ export function buildEncodeArgs(opts: VideoEncodeOptions): string[] {
     args.push("-map", "0:v");
   }
 
-  args.push(
-    "-vf",
-    `scale=${opts.width}:${opts.height}:force_original_aspect_ratio=disable`
-  );
+  const vf = `scale=${opts.width}:${opts.height}:force_original_aspect_ratio=disable`;
+  const vaapi = Boolean(opts.encoder && isVaapiEncoder(opts.encoder));
+  args.push("-vf", vaapi ? `${vf},${VAAPI_UPLOAD_FILTER}` : vf);
   args.push(...buildVideoCodecArgs(opts.encoder ?? DEFAULT_VIDEO_ENCODER, opts.crf));
-  args.push("-pix_fmt", "yuv420p", "-movflags", "+faststart");
+  // yuv420p is a software format; after hwupload the frames are VA-API
+  // surfaces and the encoder must not be told to convert them back.
+  if (!vaapi) args.push("-pix_fmt", "yuv420p");
+  args.push("-movflags", "+faststart");
   if (audio.filters.length > 0) args.push("-c:a", "aac", "-b:a", "192k", "-shortest");
   args.push("-y", opts.outPath);
   return args;

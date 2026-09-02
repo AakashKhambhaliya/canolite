@@ -27,6 +27,8 @@ import {
   buildFastRenderArgs,
   enableWindowSec,
   type FastRenderOverlay,
+  type FastRenderVideoOverlay,
+  type FastRenderStaticOverlay,
   type VideoLayerGeometry,
 } from "./filtergraph";
 import type { PreparedVideoRender, RenderVideoResult } from "./types";
@@ -121,7 +123,9 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
     await ctx.onProgress?.(Math.round(2 + (prepStep / totalPrepSteps) * (FAST_PREP_PROGRESS_CEILING - 2)));
   };
 
-  // 1. Static layers, each painted exactly once.
+  // 1. Static layers, each painted exactly once. Render order does not
+  // matter (they are separate PNGs); the z-order is applied when the
+  // overlays array is assembled below.
   const basePngPath = path.join(ctx.tmpDir, "static-base.png");
   await renderStaticSegment({
     designJson: ctx.designJson,
@@ -139,7 +143,7 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
   prepStep += 1;
   await reportPrep();
 
-  const overlays: FastRenderOverlay[] = [];
+  const staticOverlayBySegment = new Map<number, FastRenderStaticOverlay>();
   for (let k = 1; k < segments.length; k += 1) {
     if (segments[k].length === 0) continue;
     const pngPath = path.join(ctx.tmpDir, `static-${k}.png`);
@@ -154,13 +158,14 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
       customFonts: ctx.customFonts,
       outPath: pngPath,
     });
-    overlays.push({ kind: "static", pngPath });
+    staticOverlayBySegment.set(k, { kind: "static", pngPath });
     prepStep += 1;
     await reportPrep();
   }
 
   // 2. Video layers: resolve sources (SSRF-checked), confirm audio streams.
-  for (const slot of slots) {
+  const videoOverlayBySlot = new Map<number, FastRenderVideoOverlay>();
+  for (const [slotIndex, slot] of slots.entries()) {
     const { obj, layer } = slot;
     // Invisible or dead layers never appear in either renderer.
     if (obj.visible === false || !enableWindowSec(layer, timeline.durationSec)) continue;
@@ -182,9 +187,28 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
       }
     }
 
-    overlays.push({ kind: "video", layer, sourcePath, geometry: geometryOf(obj), hasAudioStream });
+    videoOverlayBySlot.set(slotIndex, {
+      kind: "video",
+      layer,
+      sourcePath,
+      geometry: geometryOf(obj),
+      hasAudioStream,
+    });
     prepStep += 1;
     await reportPrep();
+  }
+
+  // Assemble the overlays in TRUE z-order. Segment k sits between video
+  // slot k-1 (below it) and video slot k (above it):
+  //   base → video0 → static1 → video1 → static2 → …
+  // (Statics must render ABOVE the video below them — foreground text over
+  // a video is exactly this — so the interleaved order is load-bearing.)
+  const overlays: FastRenderOverlay[] = [];
+  for (let k = 1; k < segments.length; k += 1) {
+    const video = videoOverlayBySlot.get(k - 1);
+    if (video) overlays.push(video);
+    const patch = staticOverlayBySegment.get(k);
+    if (patch) overlays.push(patch);
   }
 
   // 3. One ffmpeg pass: composite + encode.
@@ -207,9 +231,12 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
 
   let lastReport = 0;
   let lastReportAt = 0;
+  // Serialize the (possibly async) callbacks so DB writes land in order —
+  // the raw ffmpeg callback fires many times a second and out of order.
+  let progressChain: Promise<void> = Promise.resolve();
   await runFfmpegWithProgress(args, {
     totalSec: timeline.durationSec,
-    timeoutMs: config.VIDEO_DECODE_TIMEOUT_MS,
+    timeoutMs: config.VIDEO_RENDER_TIMEOUT_MS,
     onProgress: (fraction) => {
       // Span FAST_PREP..99 like the legacy encoder loop does, but throttle:
       // ffmpeg reports several times a second and each callback is a DB write.
@@ -221,10 +248,13 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
       if (progress > lastReport && now - lastReportAt > 400) {
         lastReport = progress;
         lastReportAt = now;
-        void ctx.onProgress?.(progress);
+        progressChain = progressChain
+          .then(() => ctx.onProgress?.(progress))
+          .catch(() => undefined);
       }
     },
   });
+  await progressChain;
   await ctx.onProgress?.(99);
 
   // 4. Poster: first frame of the finished MP4 — no browser capture needed.

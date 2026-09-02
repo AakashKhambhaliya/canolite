@@ -30,6 +30,7 @@ const envSchema = z.object({
   // Fast-path renderer tuning (docs/video-rendering.md).
   VIDEO_FFMPEG_LOOP_MEMORY_MB: intFromEnv(512),
   VIDEO_ENCODER: stringFromEnv("libx264"),
+  VAAPI_DEVICE: stringFromEnv("/dev/dri/renderD128"),
 });
 
 export const config = envSchema.parse(process.env);

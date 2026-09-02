@@ -51,8 +51,8 @@ export class OrderedFramePipeline<T> {
     }
   }
 
-  /** Highest number of frames that were completed-but-unconsumed at once. */
-  get bufferedHighWaterMark(): number {
+  /** Frames currently completed-but-not-yet-consumed. */
+  get bufferedCount(): number {
     return this.results.size;
   }
 

@@ -43,7 +43,13 @@ appears at `startAt` and plays `[trimStart, trimEnd)` at `playbackRate`
      -to trimEnd`) — SSRF-checked by `resolveVideoSource`, same as always,
    - per layer: `fps` → `scale`/`pad`/`crop` (the **same fit math as
      `decode.ts`**) → optional `colorchannelmixer` for constant opacity →
-     `loop` filter for looping layers → `setpts=PTS+startAt/TB`,
+     for looping layers a **finite** `loop` filter (infinite `loop` never
+     reaches EOF and ffmpeg 7 transcodes past `-t` forever, hanging the
+     render) → PTS re-indexed onto an exact `1/fps` grid — AFTER the loop,
+     because `loop` replays its cache with restarting (non-monotonic)
+     timestamps that framesync would drop, blanking the overlay after the
+     first period → shifted onto the timeline at the layer's first visible
+     frame (`ceil(startAt·fps)/fps`),
    - overlays it at the Fabric `left`/`top` position (honoring
      `originX`/`originY` and `outputScale`) inside
      `enable='between(t,startAt,end)'`, `eof_action=pass`,
@@ -163,5 +169,10 @@ Rules of thumb on 2 vCPU:
 - `npm run test:comparison` renders one demo template through **both**
   renderers and asserts (Sharp pixel diffs) that streams/dimensions/durations
   match and sampled + poster frames differ by less than a small threshold.
-  It needs Chromium, ffmpeg and a free loopback port 3000, so it is not part
-  of `npm test`.
+  The video region carries a ≤1-frame temporal sampling phase (codec noise
+  dominates: mean Δ ≈ 4–7 on fast-moving synthetic bars, ≈ 0 on real
+  footage), so its thresholds are codec-loose — while z-order is asserted
+  sharply: the opaque foreground text inside the video box is diffed only on
+  the static patch's fully-opaque pixels (calibrated: text present ≈ Δ6–15,
+  text accidentally covered by the video ≈ Δ110). It needs Chromium, ffmpeg
+  and a free loopback port 3000, so it is not part of `npm test`.

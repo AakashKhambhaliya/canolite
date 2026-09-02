@@ -102,6 +102,52 @@ async function diffFrames(aPath: string, bPath: string): Promise<DiffStats> {
   return { mean: sum / n, pctOver30: (over30 / n) * 100 };
 }
 
+/**
+ * Diff two same-size frames restricted to the FULLY-OPAQUE pixels of a
+ * transparency mask (a static-patch PNG). This is the regression guard for
+ * z-order: wherever the patch is fully opaque, the composite must show the
+ * patch's own color on BOTH paths no matter which video frame is beneath —
+ * so if the fast path ever painted a static patch UNDER its video layer,
+ * the masked diff explodes, while raw whole-frame diffs can hide it inside
+ * the video's own sampling noise.
+ */
+async function diffMasked(
+  aPath: string,
+  bPath: string,
+  maskPngPath: string,
+  rect: { left: number; top: number; width: number; height: number }
+): Promise<DiffStats> {
+  const sharp = (await import("sharp")).default;
+  const extract = async (p: string) =>
+    sharp(p)
+      .extract(rect)
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+  const [a, b, mask] = await Promise.all([
+    extract(aPath),
+    extract(bPath),
+    sharp(maskPngPath)
+      .extract(rect)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true }),
+  ]);
+  let sum = 0;
+  let over30 = 0;
+  let n = 0;
+  for (let i = 0; i < a.info.width * a.info.height; i++) {
+    if (mask.data[i * 4 + 3] < 255) continue; // only fully-opaque patch pixels
+    const o = i * 3;
+    const d = (Math.abs(a.data[o] - b.data[o]) + Math.abs(a.data[o + 1] - b.data[o + 1]) + Math.abs(a.data[o + 2] - b.data[o + 2])) / 3;
+    sum += d;
+    if (d > 30) over30 += 1;
+    n += 1;
+  }
+  if (n === 0) return { mean: 0, pctOver30: 0 };
+  return { mean: sum / n, pctOver30: (over30 / n) * 100 };
+}
+
 async function extractFrame(mp4: string, atSec: number, out: string): Promise<void> {
   execFileSync(FFMPEG, ["-hide_banner", "-v", "error", "-ss", String(atSec), "-i", mp4, "-frames:v", "1", "-y", out]);
 }
@@ -289,6 +335,33 @@ async function main(): Promise<void> {
       );
     } else {
       ok(`frame t=${at}s matches`, `mean Δ ${stats.mean.toFixed(2)}, ${stats.pctOver30.toFixed(3)}% pixels >30`);
+    }
+  }
+
+  // Z-order guard: the "FOREGROUND" text (opaque, part of the static patch
+  // above the video layer) sits INSIDE the video box at left 84, top 170.
+  // Diffing only the patch's fully-opaque pixels makes the check immune to
+  // the ≤1-frame video sampling phase: opaque text pixels must match exactly
+  // on both paths if — and only if — the patch is composited ABOVE the video.
+  // The patch PNG is the one the fast path itself produced.
+  const fgPatch = path.join(fastCtx.tmpDir, "static-1.png");
+  for (const at of samples.filter((t) => t >= 0.5)) {
+    const a = path.join(ROOT, `fast-${at}.png`);
+    const b = path.join(ROOT, `legacy-${at}.png`);
+    const stats = await diffMasked(a, b, fgPatch, { left: 70, top: 160, width: 330, height: 65 });
+    // Calibrated on this template: correct z-order scores masked mean 6–15
+    // (codec noise over the moving video beneath), broken z-order scores
+    // ~110 with ~100% of pixels >30. The thresholds sit far from both.
+    if (stats.mean > 40 || stats.pctOver30 > 50) {
+      fail(
+        `foreground text at t=${at}s does not overlay the video (z-order broken?)`,
+        `masked mean ${stats.mean.toFixed(2)}, ${stats.pctOver30.toFixed(2)}% pixels >30`
+      );
+    } else {
+      ok(
+        `foreground text above video at t=${at}s`,
+        `masked mean Δ ${stats.mean.toFixed(2)}, ${stats.pctOver30.toFixed(3)}% pixels >30`
+      );
     }
   }
 

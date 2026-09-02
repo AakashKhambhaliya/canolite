@@ -15,7 +15,7 @@
  */
 import type { VideoLayer } from "./timeline";
 import { buildAudioMixFilters, layerWantsAudio, type AudioMixEntry } from "./audio";
-import { buildVideoCodecArgs, type VideoEncoder } from "./encode";
+import { buildVideoCodecArgs, isVaapiEncoder, vaapiDeviceArgs, VAAPI_UPLOAD_FILTER, type VideoEncoder } from "./encode";
 
 export interface VideoLayerGeometry {
   left: number;
@@ -97,10 +97,6 @@ export function fitFilterExpr(fit: VideoLayer["fit"], w: number, h: number): str
 /**
  * Translate a Fabric object's left/top (honoring originX/originY) into the
  * top-left pixel the overlay filter needs.
- *
- * Fabric positions an object by its center: originX "left" puts the center at
- * left + boxW/2, "right" at left − boxW/2, "center" at left. The overlay wants
- * the box's top-left corner, so x = (left + originOffset) × scale − boxW/2.
  */
 export function overlayPixelPosition(
   geometry: VideoLayerGeometry,
@@ -188,26 +184,51 @@ export function buildVideoChainFilters(params: {
 
   const { w, h } = layerBoxSize(layer, outputScale);
   const parts: string[] = [];
-  // Phase-match decode.ts: the legacy path decodes with `-ss trimStart` then
-  // `fps` applied to the RAW (seek-shifted) timestamps, so the resampled
-  // frames land on the same phase here. fps BEFORE the rate division also
-  // resamples at the output rate, so rate>1 skips source frames and rate<1
-  // holds them — the same sampling sourceTimeForFrame() performs when the
-  // legacy renderer picks decoded frames.
+  // The fps filter resamples the seeked source at the output rate — the
+  // same sampling decode.ts performs before numbering frame files.
   parts.push(`fps=${fmtNumber(fps)}`);
-  if (layer.playbackRate !== 1) parts.push(`setpts=PTS/${fmtNumber(layer.playbackRate)}`);
   parts.push(fitFilterExpr(layer.fit, w, h));
   const opacity = geometry.opacity;
   if (opacity < 1 - 1e-6) parts.push(`format=rgba,colorchannelmixer=aa=${fmtNumber(opacity)}`);
   if (layer.loop) {
-    // Cache the (box-sized, already resampled) segment and repeat it forever.
-    // Memory ≈ size × w × h bytes; guarded by the budget check in
-    // isSimpleVideoTemplate. Over-sizing is safe: at input EOF the filter
-    // loops whatever it cached.
+    // Repeat the cached (box-sized) segment a FINITE number of times —
+    // enough for the visible window at this playbackRate. An infinite
+    // `loop` never reaches EOF and ffmpeg 7 keeps transcoding past `-t`
+    // forever, hanging the render; finite repeats end the graph by
+    // construction. The enable window cuts the tail (and the layer's audio
+    // plays once, like the legacy loop). Memory ≈ size × w × h; guarded by
+    // the budget check in loopCacheWithinBudget. Over-sizing the cache is
+    // safe: at input EOF the filter loops whatever it cached.
     const size = Math.ceil(layerSpanSec(layer) * fps) + 1;
-    parts.push(`loop=loop=-1:size=${size}:start=0`);
+    const rate = Math.max(1e-6, layer.playbackRate);
+    const repeatsNeeded = Math.max(
+      0,
+      Math.ceil(((window.end - window.start) * rate) / layerSpanSec(layer) - 1e-6) - 1
+    );
+    if (repeatsNeeded > 0) parts.push(`loop=loop=${repeatsNeeded}:size=${size}:start=0`);
   }
-  parts.push(`setpts=PTS+${fmtNumber(window.start)}/TB`);
+  // Timestamp hygiene — applied AFTER the loop filter: `loop` replays its
+  // cached frames with their original pts, which RESTARTS at 0 on every
+  // wrap; framesync drops non-monotonic secondary frames, so the overlay
+  // would go blank after the first period. Re-indexing the j-th emitted
+  // frame onto the exact j/fps grid (N counts across repeats) yields
+  // strictly monotonic timestamps, and the chain's timing becomes
+  // deterministic regardless of demuxer/seek behavior. The content mapping
+  // becomes emitted[j] = source frame (j mod span·fps) — the legacy loop's
+  // modulo.
+  parts.push(`setpts=N/(${fmtNumber(fps)}*TB)`);
+  // playbackRate: rescale the (now exactly gridded, monotonic) stream.
+  // rate>1 skips source frames, rate<1 holds them — the same sampling
+  // sourceTimeForFrame() performs when the legacy renderer picks frames.
+  if (layer.playbackRate !== 1) parts.push(`setpts=PTS/${fmtNumber(layer.playbackRate)}`);
+  // Shift onto the timeline. The landing point is legacy's own mapping:
+  // sourceTimeForFrame() is null for t < startAt, so the first visible
+  // output frame is ceil(startAt × fps) — for off-grid startAt values
+  // (0.5s at 15fps = 7.5 frames) landing exactly on startAt would put every
+  // frame BETWEEN grid points and make the sampled source frame ambiguous
+  // (the legacy loop floors to the later grid point).
+  const landStart = Math.ceil(window.start * fps - 1e-6) / fps;
+  parts.push(`setpts=PTS-STARTPTS+${fmtNumber(landStart)}/TB`);
   return parts;
 }
 
@@ -277,20 +298,27 @@ export function buildFastRenderArgs(plan: FastRenderPlan): FastRenderArgsResult 
     }
   }
 
-  filters.push(
-    `${prevLabel}scale=${plan.evenWidth}:${plan.evenHeight}:force_original_aspect_ratio=disable[vout]`
-  );
+  // VA-API encoders consume hardware surfaces: upload after the final scale
+  // (the documented software-frames recipe; -vaapi_device is added below).
+  const finalFilter = isVaapiEncoder(plan.encoder)
+    ? `${prevLabel}scale=${plan.evenWidth}:${plan.evenHeight}:force_original_aspect_ratio=disable,${VAAPI_UPLOAD_FILTER}[vout]`
+    : `${prevLabel}scale=${plan.evenWidth}:${plan.evenHeight}:force_original_aspect_ratio=disable[vout]`;
+  filters.push(finalFilter);
 
   const audio = buildAudioMixFilters(audioEntries, { padToSec: plan.durationSec });
   filters.push(...audio.filters);
 
   const args: string[] = ["-hide_banner", "-v", "error"];
+  if (isVaapiEncoder(plan.encoder)) args.push(...vaapiDeviceArgs());
   if (plan.progress) args.push("-progress", "pipe:1", "-nostats");
   for (const input of inputs) args.push(...input);
   args.push("-filter_complex", filters.join(";"), "-map", "[vout]");
   if (audio.filters.length > 0) args.push("-map", audio.outputLabel);
   args.push(...buildVideoCodecArgs(plan.encoder, plan.crf));
-  args.push("-pix_fmt", "yuv420p", "-movflags", "+faststart");
+  // yuv420p is a SOFTWARE pixel format — the VA-API encoder takes hardware
+  // surfaces (nv12 via hwupload), so requesting it there breaks the encode.
+  if (!isVaapiEncoder(plan.encoder)) args.push("-pix_fmt", "yuv420p");
+  args.push("-movflags", "+faststart");
   if (audio.filters.length > 0) args.push("-c:a", "aac", "-b:a", "192k");
   // No -shortest here: every stream is already hard-bounded to durationSec
   // (looped/static inputs via -t, the mix via apad, and the output via -t).

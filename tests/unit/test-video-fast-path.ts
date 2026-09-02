@@ -252,6 +252,11 @@ console.log("\n2. filter-graph geometry and enable windows\n");
     null,
     "an empty trim window is a dead layer (null window)"
   );
+  assertEqual(
+    enableWindowSec(videoLayer({ startAt: 0.5, trimStart: 0, trimEnd: 3, loop: false }), 30),
+    { start: 0.5, end: 3.5 },
+    "enable window keeps the raw startAt (visibility boundary)"
+  );
 }
 
 // =============================================================
@@ -294,12 +299,16 @@ const basePlan = {
 
   const fc = args[args.indexOf("-filter_complex") + 1];
   assert(
-    fc.includes("[1:v]fps=30,scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black,setpts=PTS+1.5/TB[v0]"),
-    "video chain: fps (decode.ts phase) → contain scale+pad → setpts to startAt"
+    fc.includes("[1:v]fps=30,scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black,setpts=N/(30*TB),setpts=PTS-STARTPTS+1.5/TB[v0]"),
+    "video chain: fps → exact grid re-index (decode.ts frame mapping) → contain scale+pad → setpts to startAt"
   );
   assert(
     fc.includes("[0:v][v0]overlay=x=100:y=50:eof_action=pass:enable='between(t,1.5,4.5)'[o0]"),
     "overlay at the computed pixel with a between() enable window"
+  );
+  assert(
+    fc.includes("setpts=PTS-STARTPTS+1.5/TB"),
+    "the layer lands exactly on startAt (post-ss PTS base normalized away)"
   );
   assert(fc.endsWith("[o0]scale=640:480:force_original_aspect_ratio=disable[vout]"), "final scale labels [vout]");
   const clipIdx = args.indexOf("/tmp/clip.mp4");
@@ -355,7 +364,8 @@ const basePlan = {
   const { args, audioInputCount } = buildFastRenderArgs(plan);
   assertEqual(audioInputCount, 1, "muted layer contributes no audio input; looping layer does");
   const fc = args[args.indexOf("-filter_complex") + 1];
-  assert(fc.includes("loop=loop=-1:size=91:start=0"), "looping layer gets a loop filter sized to its span");
+  // durationSec 10, visible window 10s, span 3s → ceil(10/3) − 1 = 3 repeats.
+  assert(fc.includes("loop=loop=3:size=91:start=0"), "looping layer repeats a finite number of times covering its window");
   assertEqual((fc.match(/loop=loop=/g) || []).length, 1, "non-looping layer has no loop filter");
   assert(
     fc.includes("[0:v][v0]overlay") && fc.includes("[o0][3:v]overlay=x=0:y=0") &&
@@ -398,7 +408,65 @@ const basePlan = {
     overlays: [{ kind: "video" as const, layer: videoLayer({ playbackRate: 2 }), sourcePath: "/tmp/c.mp4", geometry: { left: 0, top: 0, opacity: 1 }, hasAudioStream: false }],
   });
   assert(res.args.includes("-progress") && res.args.includes("pipe:1"), "progress mode emits -progress pipe:1");
-  assert(res.args[res.args.indexOf("-filter_complex") + 1].includes("fps=30,setpts=PTS/2"), "playbackRate divides PTS after fps resampling");
+  assert(res.args[res.args.indexOf("-filter_complex") + 1].includes("setpts=N/(30*TB),setpts=PTS/2"), "playbackRate divides the gridded PTS");
+}
+
+{
+  // Landing time: ceil(startAt × fps)/fps — legacy's first visible frame.
+  // (Read out of the generated chain so the test pins the full expression.)
+  const landChain = (startAt: number, fps: number) => {
+    const res = buildFastRenderArgs({
+      ...basePlan,
+      fps,
+      durationSec: 30,
+      overlays: [{ kind: "video" as const, layer: videoLayer({ startAt, trimStart: 0, trimEnd: 20 }), sourcePath: "/tmp/l.mp4", geometry: { left: 0, top: 0, opacity: 1 }, hasAudioStream: false }],
+    });
+    const fc = res.args[res.args.indexOf("-filter_complex") + 1];
+    const m = fc.match(/setpts=PTS-STARTPTS\+([0-9.]+)\/TB/);
+    return m ? Number(m[1]) : NaN;
+  };
+  assertEqual(landChain(0.5, 15), Number((8 / 15).toFixed(6)), "off-grid startAt 0.5s @15fps lands on frame 8");
+  assertEqual(landChain(2, 30), 2, "on-grid startAt lands exactly on startAt");
+  assertEqual(landChain(1.0333, 30), Number((Math.ceil(1.0333 * 30) / 30).toFixed(6)), "fractional startAt rounds up to the next frame");
+
+  // Finite loop repeats (an infinite loop filter hangs ffmpeg past -t):
+  // repeats = ceil(window/span) − 1.
+  const loopRepeats = (durationSec: number, span: number) => {
+    const res = buildFastRenderArgs({
+      ...basePlan,
+      durationSec,
+      overlays: [{ kind: "video" as const, layer: videoLayer({ loop: true, trimStart: 0, trimEnd: span }), sourcePath: "/tmp/l.mp4", geometry: { left: 0, top: 0, opacity: 1 }, hasAudioStream: false }],
+    });
+    const fc = res.args[res.args.indexOf("-filter_complex") + 1];
+    const m = fc.match(/loop=loop=(\d+):/);
+    return m ? Number(m[1]) : 0;
+  };
+  assertEqual(loopRepeats(10, 3), 3, "10s window over a 3s loop repeats 3× (covers 12s ≥ 10s)");
+  assertEqual(loopRepeats(6, 3), 1, "6s window over a 3s loop repeats exactly 1×");
+  assertEqual(loopRepeats(3, 3), 0, "a window equal to the span needs no loop filter at all");
+  assertEqual(loopRepeats(2, 5), 0, "a window shorter than the span needs no loop filter");
+
+  // The grid re-index must come AFTER the loop filter: `loop` replays its
+  // cache with restarting (non-monotonic) pts, which framesync drops — the
+  // overlay would go blank after the first period.
+  const loopedFc = buildFastRenderArgs({
+    ...basePlan,
+    durationSec: 10,
+    overlays: [{ kind: "video" as const, layer: videoLayer({ loop: true, trimStart: 0, trimEnd: 3 }), sourcePath: "/tmp/l.mp4", geometry: { left: 0, top: 0, opacity: 1 }, hasAudioStream: false }],
+  }).args;
+  const looped = loopedFc[loopedFc.indexOf("-filter_complex") + 1];
+  assert(
+    looped.indexOf("loop=loop=") < looped.indexOf("setpts=N/(30*TB)"),
+    "grid re-index runs after the loop filter (monotonic pts across wraps)"
+  );
+  // Repeats must scale with playbackRate: a 2× rate consumes the source twice
+  // as fast (5s window × 2 ÷ 2s span → 5 plays → 4 repeats).
+  const rate2 = buildFastRenderArgs({
+    ...basePlan,
+    durationSec: 5,
+    overlays: [{ kind: "video" as const, layer: videoLayer({ loop: true, trimStart: 0, trimEnd: 2, playbackRate: 2 }), sourcePath: "/tmp/l.mp4", geometry: { left: 0, top: 0, opacity: 1 }, hasAudioStream: false }],
+  }).args;
+  assert(rate2[rate2.indexOf("-filter_complex") + 1].includes("loop=loop=4:"), "loop repeats scale with playbackRate");
 }
 
 // =============================================================
@@ -427,8 +495,17 @@ console.log("\n4. audio mixing and encoder selection\n");
   assert(!layerWantsAudio({ hasAudio: false, muted: false, volume: 1 }), "hasAudio=false does not");
 
   assertEqual(buildVideoCodecArgs("libx264", 23), ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"], "libx264 args unchanged from the legacy encoder");
-  assertEqual(buildVideoCodecArgs("h264_nvenc", 23)[0], "-c:v", "nvenc args start with -c:v");
-  assertEqual(buildVideoCodecArgs("h264_videotoolbox", 23).length, 4, "videotoolbox swaps only the codec flags");
+  assertEqual(
+    buildVideoCodecArgs("h264_nvenc", 23),
+    ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0"],
+    "nvenc args: -b:v 0 so -cq governs quality"
+  );
+  const vt = buildVideoCodecArgs("h264_videotoolbox", 23);
+  assertEqual(vt.length, 4, "videotoolbox swaps only the codec flags");
+  assertEqual(vt[3], "52", "videotoolbox maps CRF 23 to the 1-100 quality dial");
+  assertEqual(buildVideoCodecArgs("h264_videotoolbox", 35)[3], "1", "videotoolbox quality clamps at 1");
+  assertEqual(buildVideoCodecArgs("h264_videotoolbox", 12)[3], "100", "videotoolbox quality clamps at 100");
+  assertEqual(buildVideoCodecArgs("h264_vaapi", 23), ["-c:v", "h264_vaapi", "-qp", "23"], "vaapi codec args unchanged");
   assertEqual(resolveVideoEncoder(), "libx264", "default encoder is libx264");
 }
 

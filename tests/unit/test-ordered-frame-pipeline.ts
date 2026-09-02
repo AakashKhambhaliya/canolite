@@ -97,9 +97,9 @@ async function main() {
         return i;
       },
       consume: async (_frame, i) => {
-        maxBuffered = Math.max(maxBuffered, p.bufferedHighWaterMark);
+        maxBuffered = Math.max(maxBuffered, p.bufferedCount);
         await delay(5); // consumer slower than producer
-        if (i === 0) maxBuffered = Math.max(maxBuffered, p.bufferedHighWaterMark);
+        if (i === 0) maxBuffered = Math.max(maxBuffered, p.bufferedCount);
       },
     });
     await p.run(40);
