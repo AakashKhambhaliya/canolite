@@ -7,7 +7,7 @@
  * design Fabric can draw. VIDEO_FORCE_LEGACY_RENDERER=1 pins the legacy path
  * for debugging.
  */
-import { auditVideoObjects, loopCacheWithinBudget } from "./simple-template";
+import { auditVideoObjects, loopCacheRejectionReason } from "./simple-template";
 import type { VideoLayer } from "./timeline";
 
 export type VideoRenderer = "ffmpeg" | "chromium";
@@ -19,8 +19,7 @@ export function chooseRenderer(
   if (opts.forceLegacy) return { renderer: "chromium", reason: "forced by VIDEO_FORCE_LEGACY_RENDERER" };
   const facts = auditVideoObjects(designJson);
   if (!facts.audit.simple) return { renderer: "chromium", reason: facts.audit.reasons[0] };
-  if (!loopCacheWithinBudget(opts.layers, opts.fps, opts.outputScale)) {
-    return { renderer: "chromium", reason: "a looping layer exceeds VIDEO_FFMPEG_LOOP_MEMORY_MB" };
-  }
+  const loopRejection = loopCacheRejectionReason(opts.layers, opts.fps, opts.outputScale);
+  if (loopRejection) return { renderer: "chromium", reason: loopRejection };
   return { renderer: "ffmpeg" };
 }

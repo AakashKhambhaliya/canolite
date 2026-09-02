@@ -72,6 +72,29 @@ export function fmtNumber(value: number): string {
 }
 
 /**
+ * ffmpeg's video `loop` filter caps `size` at INT16_MAX frames (the option is
+ * declared "from 0 to 32767" in libavfilter/f_loop.c). Exceeding it is not
+ * clamped — the filter refuses to initialize:
+ *
+ *   Value 40000.000000 for parameter 'size' out of range [0 - 32767]
+ *   Error applying option 'size' to filter 'loop': Result too large
+ *
+ * That kills the graph before a single frame is written, and the dispatcher
+ * has no fallback, so the detector rejects such layers up front
+ * (loopCacheWithinBudget) rather than letting the render die in ffmpeg.
+ */
+export const FFMPEG_LOOP_MAX_SIZE = 32767;
+
+/**
+ * Frames the `loop` filter must cache to replay one full trimmed segment.
+ * Shared with the detector so the budget check and the emitted command can
+ * never disagree about the size being requested.
+ */
+export function loopFilterSize(spanSec: number, fps: number): number {
+  return Math.ceil(spanSec * fps) + 1;
+}
+
+/**
  * Output box of a video layer in the scaled design space — matches what
  * decode.ts feeds buildFrameDecodeArgs (boxW × outputScale, rounded).
  */
@@ -199,7 +222,7 @@ export function buildVideoChainFilters(params: {
     // plays once, like the legacy loop). Memory ≈ size × w × h; guarded by
     // the budget check in loopCacheWithinBudget. Over-sizing the cache is
     // safe: at input EOF the filter loops whatever it cached.
-    const size = Math.ceil(layerSpanSec(layer) * fps) + 1;
+    const size = loopFilterSize(layerSpanSec(layer), fps);
     const rate = Math.max(1e-6, layer.playbackRate);
     const repeatsNeeded = Math.max(
       0,

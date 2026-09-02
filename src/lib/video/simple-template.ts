@@ -10,6 +10,7 @@
  */
 import { isImage } from "@/lib/design/predicates";
 import { config } from "@/lib/config";
+import { FFMPEG_LOOP_MAX_SIZE, loopFilterSize } from "./filtergraph";
 import type { VideoLayer } from "./timeline";
 
 export interface SimpleTemplateAudit {
@@ -147,22 +148,44 @@ export function auditVideoObjects(designJson: any): VideoObjectFacts {
 /**
  * The fast path's `loop` filter caches the trimmed segment (box-sized frames)
  * in memory. Reject templates whose loop cache would blow the configured
- * budget — those keep the legacy path, which loops by re-reading decoded
- * frames from disk instead.
+ * memory budget OR exceed ffmpeg's hard cap on the filter's frame count —
+ * those keep the legacy path, which loops by re-reading decoded frames from
+ * disk instead.
  */
-export function loopCacheWithinBudget(layers: VideoLayer[], fps: number, outputScale: number): boolean {
+export function loopCacheRejectionReason(
+  layers: VideoLayer[],
+  fps: number,
+  outputScale: number
+): string | null {
   for (const layer of layers) {
     if (!layer.loop) continue;
     const span = Math.max(0, layer.trimEnd - layer.trimStart);
     if (span <= 0) continue; // dead layer — never rendered by either path
+
+    // ffmpeg refuses to build a `loop` filter with size > 32767 (see
+    // FFMPEG_LOOP_MAX_SIZE), and there is no fallback once the fast path is
+    // chosen. The memory check below catches most oversized loops on its
+    // own, but not all of them: a SMALL box escapes the byte budget while
+    // still blowing the frame cap (at the default 512MB a ~73×73 layer
+    // reaches 32767 frames well under budget). Check the cap explicitly.
+    const size = loopFilterSize(span, fps);
+    if (size > FFMPEG_LOOP_MAX_SIZE) {
+      return `${layer.name}: looping ${size} frames exceeds ffmpeg's loop size cap (${FFMPEG_LOOP_MAX_SIZE})`;
+    }
+
     const frames = Math.ceil(span * fps);
     const w = Math.max(1, Math.round(layer.boxW * outputScale));
     const h = Math.max(1, Math.round(layer.boxH * outputScale));
     // The loop filter caches decoded frames in memory (RGB-ish worst case ×3).
     const bytes = frames * w * h * 3;
     if (bytes > config.VIDEO_FFMPEG_LOOP_MEMORY_MB * 1024 * 1024) {
-      return false;
+      return `${layer.name}: a looping layer exceeds VIDEO_FFMPEG_LOOP_MEMORY_MB`;
     }
   }
-  return true;
+  return null;
+}
+
+/** Boolean view of {@link loopCacheRejectionReason} — one implementation, two shapes. */
+export function loopCacheWithinBudget(layers: VideoLayer[], fps: number, outputScale: number): boolean {
+  return loopCacheRejectionReason(layers, fps, outputScale) === null;
 }

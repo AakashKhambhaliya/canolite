@@ -108,7 +108,11 @@ The fast path is used when **every** video object is "simple":
 - for looping layers, the loop cache (trimmed span × fps × box pixels)
   fits `VIDEO_FFMPEG_LOOP_MEMORY_MB` (default 512 MB) — otherwise the loop
   would buffer frames in RAM and the legacy path (which loops from disk) is
-  safer.
+  safer,
+- for looping layers, the cached segment is also at most **32767 frames** —
+  ffmpeg's `loop` filter hard-caps `size` there and refuses to build the
+  graph above it ("Result too large"). A small box can slip under the memory
+  budget while still blowing this cap, so it is checked separately.
 
 Anything else — rotated text over video, clipped/shadowed videos, videos
 inside groups, non-numeric opacity — silently uses the legacy path (the first

@@ -11,8 +11,10 @@ import { chooseRenderer } from "../../src/lib/video/renderer-choice";
 import {
   buildFastRenderArgs,
   enableWindowSec,
+  FFMPEG_LOOP_MAX_SIZE,
   fitFilterExpr,
   layerBoxSize,
+  loopFilterSize,
   overlayPixelPosition,
 } from "../../src/lib/video/filtergraph";
 import { buildAudioMixFilters, layerWantsAudio } from "../../src/lib/video/audio";
@@ -195,6 +197,34 @@ console.log("1. simple-template detector\n");
     loopCacheWithinBudget([videoLayer({ loop: true, trimStart: 3, trimEnd: 3 })], 30, 1),
     true,
     "an empty trim window (dead layer) never trips the loop budget"
+  );
+
+  // ffmpeg's `loop` filter refuses size > 32767 ("Result too large"), which
+  // kills the render outright. A SMALL box slips under the memory budget
+  // while still blowing that cap, so the frame count needs its own check:
+  // 1100s × 30fps = 33001 frames (over the cap) at 73×73×3 ≈ 503MB (under
+  // the 512MB default).
+  const tinyButEndless = videoLayer({ loop: true, trimStart: 0, trimEnd: 1100, boxW: 73, boxH: 73 });
+  assertEqual(
+    loopCacheWithinBudget([tinyButEndless], 30, 1),
+    false,
+    "a tiny box looping past 32767 frames is rejected even though it fits the memory budget"
+  );
+  assertEqual(
+    loopFilterSize(1100, 30) > FFMPEG_LOOP_MAX_SIZE,
+    true,
+    "…and that layer really does exceed ffmpeg's loop size cap"
+  );
+  const justUnderCap = videoLayer({ loop: true, trimStart: 0, trimEnd: 1000, boxW: 73, boxH: 73 });
+  assertEqual(
+    loopCacheWithinBudget([justUnderCap], 30, 1),
+    true,
+    "a layer just under the loop size cap is still accepted"
+  );
+  assertEqual(
+    loopFilterSize(1000, 30),
+    30001,
+    "loopFilterSize matches the size the filter graph actually emits"
   );
 }
 
@@ -546,6 +576,24 @@ console.log("\n5. renderer choice\n");
   );
   assertEqual(bigLoopChoice.renderer, "chromium", "an oversized loop cache takes the legacy path");
   assert(Boolean(bigLoopChoice.reason?.includes("VIDEO_FFMPEG_LOOP_MEMORY_MB")), "the loop-budget reason is logged");
+
+  // A loop rejected for the FRAME CAP must not be reported as a memory
+  // problem — that reason is what an operator reads to find out why a
+  // template went slow.
+  const endlessLoop = videoLayer({ loop: true, trimStart: 0, trimEnd: 1100, boxW: 73, boxH: 73 });
+  const endlessChoice = chooseRenderer(
+    { objects: [videoObject({ loop: true, trimStart: 0, trimEnd: 1100, width: 73, height: 73 })] },
+    { layers: [endlessLoop], fps: 30, outputScale: 1, forceLegacy: false }
+  );
+  assertEqual(endlessChoice.renderer, "chromium", "a loop over ffmpeg's size cap takes the legacy path");
+  assert(
+    Boolean(endlessChoice.reason?.includes("loop size cap")),
+    "the size-cap reason names the cap, not the memory budget"
+  );
+  assert(
+    !endlessChoice.reason?.includes("VIDEO_FFMPEG_LOOP_MEMORY_MB"),
+    "…and does not blame the memory budget"
+  );
 }
 
 console.log("\n================================================================");
