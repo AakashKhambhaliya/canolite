@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,7 @@ import { EmptyState } from "@/components/empty-state";
 import { toast } from "sonner";
 import {
   Search,
+  Timer,
   Image as ImageIcon,
   RefreshCw,
   ExternalLink,
@@ -45,8 +46,16 @@ import {
   Package,
   Video,
 } from "lucide-react";
-import { cn, formatRelativeTime, formatDuration, copyToClipboard } from "@/lib/utils";
+import { cn, formatRelativeTime, copyToClipboard } from "@/lib/utils";
 import { Suspense } from "react";
+import { useRenderStats } from "@/hooks/use-render-stats";
+import {
+  describeEstimate,
+  estimateRenderMs,
+  formatEta,
+  formatRenderTime,
+  remainingMs,
+} from "@/lib/render-time";
 
 const STATUS_CONFIG: Record<string, { label: string; variant: any; icon: any }> = {
   queued: {
@@ -90,6 +99,37 @@ function RendersContent() {
     },
     refetchInterval: 5000, // Poll for updates
   });
+
+  // Measured render times for this project: the "typical" numbers in the header
+  // and the per-row estimates for jobs that haven't finished yet.
+  const { data: renderStats } = useRenderStats();
+
+  /**
+   * Ticks once a second so the elapsed/remaining readouts on in-flight renders
+   * advance. Only runs while something is actually rendering — a page of
+   * finished jobs re-renders for nothing otherwise.
+   */
+  const [now, setNow] = useState(() => Date.now());
+  const hasActive = !!renders?.some(
+    (r: any) => r.status === "queued" || r.status === "processing"
+  );
+  useEffect(() => {
+    if (!hasActive) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [hasActive]);
+
+  /** Time estimate for one render row, keyed to its own template when known. */
+  const estimateFor = (render: any) =>
+    estimateRenderMs(renderStats, {
+      kind: render.outputKind === "video" ? "video" : "image",
+      templateId: render.templateUid ?? null,
+      width: render.templateWidth,
+      height: render.templateHeight,
+      scale: render.scale,
+      fps: render.fps,
+      durationSec: render.durationSec,
+    });
 
   const retryMutation = useMutation({
     mutationFn: async (id: string) => {
@@ -154,6 +194,25 @@ function RendersContent() {
           <p className="text-muted-foreground mt-1">
             Track and manage all render jobs
           </p>
+          {/* Typical times, measured from this project's own history — the
+              same numbers the per-render estimates are built from. */}
+          {(renderStats?.image || renderStats?.video) && (
+            <p className="text-xs text-muted-foreground mt-2 flex items-center gap-1.5">
+              <Timer className="h-3.5 w-3.5" />
+              Typical render time:
+              {renderStats?.image && (
+                <span title={`${renderStats.image.samples} completed image renders`}>
+                  images {formatRenderTime(renderStats.image.medianMs)}
+                </span>
+              )}
+              {renderStats?.image && renderStats?.video && <span>·</span>}
+              {renderStats?.video && (
+                <span title={`${renderStats.video.samples} completed video renders`}>
+                  video {formatRenderTime(renderStats.video.medianMs)}
+                </span>
+              )}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -268,6 +327,14 @@ function RendersContent() {
           {filteredRenders.map((render: any) => {
             const status = STATUS_CONFIG[render.status] || STATUS_CONFIG.queued;
             const StatusIcon = status.icon;
+            const active =
+              render.status === "queued" || render.status === "processing";
+            // Renders start as soon as they are created (in-process), so
+            // createdAt is the clock start for an in-flight job.
+            const elapsedMs = active
+              ? Math.max(0, now - new Date(render.createdAt).getTime())
+              : 0;
+            const estimate = estimateFor(render);
 
             return (
               <Card
@@ -314,12 +381,39 @@ function RendersContent() {
                       <span>{render.outputKind === "video" ? `${render.fps || 30} fps` : `Quality ${render.quality || 90}`}</span>
                       <span>·</span>
                       <span>Scale {render.scale || 1}x</span>
-                      {render.durationMs && (
+                      {/* Render time: what it took once finished, or how long
+                          it has been going and how much is likely left. */}
+                      {render.durationMs ? (
                         <>
                           <span>·</span>
-                          <span>{formatDuration(render.durationMs)}</span>
+                          <span
+                            className="flex items-center gap-1"
+                            title="Time this render took"
+                          >
+                            <Timer className="h-3 w-3" />
+                            {formatRenderTime(render.durationMs)}
+                          </span>
                         </>
-                      )}
+                      ) : active ? (
+                        <>
+                          <span>·</span>
+                          <span
+                            className="flex items-center gap-1"
+                            title={describeEstimate(estimate)}
+                          >
+                            <Timer className="h-3 w-3" />
+                            {formatRenderTime(elapsedMs)} elapsed ·{" "}
+                            {formatEta(
+                              remainingMs({
+                                elapsedMs,
+                                progress: render.progress,
+                                estimateMs: estimate.ms,
+                              })
+                            )}{" "}
+                            left
+                          </span>
+                        </>
+                      ) : null}
                       <span>·</span>
                       <span>{formatRelativeTime(render.createdAt)}</span>
                     </div>
@@ -456,13 +550,41 @@ function RendersContent() {
                   </p>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">Duration</span>
+                  <span className="text-muted-foreground">Render time</span>
                   <p className="mt-1 font-medium">
                     {selectedRender.durationMs
-                      ? formatDuration(selectedRender.durationMs)
-                      : "—"}
+                      ? formatRenderTime(selectedRender.durationMs)
+                      : selectedRender.status === "queued" ||
+                          selectedRender.status === "processing"
+                        ? `${formatRenderTime(
+                            Math.max(
+                              0,
+                              now - new Date(selectedRender.createdAt).getTime()
+                            )
+                          )} so far · ${formatEta(
+                            estimateFor(selectedRender).ms
+                          )} expected`
+                        : "—"}
                   </p>
                 </div>
+                {selectedRender.outputKind === "video" && (
+                  <>
+                    <div>
+                      <span className="text-muted-foreground">Frame rate</span>
+                      <p className="mt-1 font-medium">
+                        {selectedRender.fps || 30} fps
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Length</span>
+                      <p className="mt-1 font-medium">
+                        {selectedRender.durationSec
+                          ? `${selectedRender.durationSec}s`
+                          : "Auto"}
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Error */}

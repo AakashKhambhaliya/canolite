@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { renderJobs } from "@/db/schema";
-import { eq, and, desc } from "drizzle-orm";
+import { renderJobs, templates } from "@/db/schema";
+import { eq, and, desc, getTableColumns } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 
 export async function GET(request: Request) {
@@ -20,9 +20,20 @@ export async function GET(request: Request) {
       ? and(eq(renderJobs.projectId, user.projectId), eq(renderJobs.status, status))
       : eq(renderJobs.projectId, user.projectId);
 
+    // The template is joined in for two reasons: the dashboard's search box
+    // has always filtered on `templateName` (which the API never sent, so it
+    // matched nothing), and the public `templateUid` is the key the render-time
+    // statistics are grouped by, so a row can show a per-template estimate.
     const results = await db
-      .select()
+      .select({
+        ...getTableColumns(renderJobs),
+        templateName: templates.name,
+        templateUid: templates.templateId,
+        templateWidth: templates.width,
+        templateHeight: templates.height,
+      })
       .from(renderJobs)
+      .leftJoin(templates, eq(renderJobs.templateId, templates.id))
       .where(where)
       .orderBy(desc(renderJobs.createdAt))
       .limit(100);
