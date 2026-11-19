@@ -1,3 +1,4 @@
+import { renderSignal } from "@/lib/security/render-budget";
 /**
  * Inline custom font files before rendering.
  *
@@ -23,7 +24,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { storageFilePath } from "@/lib/storage";
-import { safeFetch } from "@/lib/ssrf";
+import { fetchPublic } from "@/lib/ssrf";
 import type { CustomFontRef } from "./render-image";
 
 const FETCH_TIMEOUT_MS = 15_000;
@@ -49,21 +50,15 @@ function toDataUrl(url: string, bytes: Buffer): string {
 async function readStoredFont(url: string): Promise<Buffer> {
   const key = decodeURIComponent(url.replace(/^\/storage\//, ""));
   // storageFilePath is traversal-checked and throws on a key that escapes root.
-  return fs.readFile(storageFilePath(key));
+  const file = storageFilePath(key);
+  if ((await fs.stat(file)).size > MAX_FONT_BYTES) throw new Error("Font too large");
+  return fs.readFile(file);
 }
 
 async function fetchFont(url: string): Promise<Buffer> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await safeFetch(url, { signal: controller.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength > MAX_FONT_BYTES) throw new Error("font is too large (max 10MB)");
-    return buf;
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await fetchPublic(url,{signal: renderSignal(), timeoutMs: FETCH_TIMEOUT_MS, maxBytes: MAX_FONT_BYTES});
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.bytes;
 }
 
 /**
@@ -73,21 +68,18 @@ async function fetchFont(url: string): Promise<Buffer> {
 export async function inlineFontSources(
   fonts: CustomFontRef[]
 ): Promise<CustomFontRef[]> {
-  return Promise.all(
-    fonts.map(async (font) => {
-      if (!font.url || font.url.startsWith("data:")) return font;
-      try {
-        const bytes = font.url.startsWith("/storage/")
-          ? await readStoredFont(font.url)
-          : await fetchFont(font.url);
-        return { ...font, url: toDataUrl(font.url, bytes) };
-      } catch (err: any) {
-        console.error(
-          `[render] Could not inline custom font "${font.family}" (${font.url}):`,
-          err?.message || err
-        );
-        return font;
-      }
-    })
-  );
+  const result: CustomFontRef[] = [];
+  let bytesRead = 0;
+  if (fonts.length > 64) throw new Error("Too many custom fonts");
+  for (const font of fonts) {
+    renderSignal()?.throwIfAborted();
+    if (!font.url || font.url.startsWith("data:")) { result.push(font); continue; }
+    let bytes: Buffer;
+    try { bytes = font.url.startsWith("/storage/") ? await readStoredFont(font.url) : await fetchFont(font.url); }
+    catch { renderSignal()?.throwIfAborted(); result.push(font); continue; } // browser network is deny-by-default
+    bytesRead += bytes.length;
+    if (bytesRead > 32 * 1024 * 1024) throw new Error("Custom fonts exceed render budget");
+    result.push({ ...font, url: toDataUrl(font.url, bytes) });
+  }
+  return result;
 }

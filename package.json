@@ -1,6 +1,6 @@
 {
   "name": "canolite",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "private": true,
   "license": "MIT",
   "scripts": {
@@ -18,8 +18,11 @@
     "db:backup": "tsx src/db/backup.ts",
     "worker": "tsx src/queue/worker.ts",
     "test": "npm run test:unit",
-    "test:unit": "tsx tests/unit/test-all.ts && tsx tests/unit/test-video-fast-path.ts && tsx tests/unit/test-ordered-frame-pipeline.ts",
-    "test:comparison": "tsx tests/comparison/compare-paths.ts"
+    "test:unit": "tsx tests/unit/test-all.ts && tsx tests/unit/test-video-fast-path.ts && tsx tests/unit/test-ordered-frame-pipeline.ts && tsx tests/unit/test-security.ts && tsx --test tests/editor/limits.test.ts",
+    "test:comparison": "tsx tests/comparison/compare-paths.ts",
+    "test:studio": "node tests/editor/studio-smoke.mjs && node tests/editor/studio-resilience.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:studio:media": "node tests/editor/studio-media.mjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.2",
@@ -46,21 +49,21 @@
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
     "embedded-postgres": "^18.4.0-beta.17",
-    "fabric": "^6.6.1",
+    "fabric": "^7.4.0",
     "ffmpeg-static": "^5.3.0",
     "ffprobe-static": "^3.1.0",
     "lucide-react": "^1.17.0",
-    "next": "^15.5.23",
+    "next": "^15.5.29",
     "pg": "^8.21.0",
     "playwright": "1.60.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "sharp": "^0.35.3",
+    "sharp": "^0.35.5",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
     "tw-animate-css": "^1.2.0",
     "uuid": "^11.1.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
@@ -71,10 +74,27 @@
     "@types/react-dom": "^19.1.0",
     "drizzle-kit": "^0.31.1",
     "eslint": "^9.28.0",
-    "eslint-config-next": "15.5.19",
-    "postcss": "^8.5.15",
+    "eslint-config-next": "15.5.29",
+    "postcss": "^8.5.33",
     "tailwindcss": "^4.3.0",
     "tsx": "^4.22.4",
     "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "$postcss",
+      "sharp": "$sharp"
+    },
+    "readdir-glob": {
+      "minimatch": "^11.0.9"
+    },
+    "brace-expansion@^1": "1.1.22",
+    "js-yaml@^4": "4.3.2",
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.9"
+    },
+    "@esbuild-kit/core-utils": {
+      "esbuild": "0.25.12"
+    }
   }
 }

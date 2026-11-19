@@ -26,6 +26,8 @@ const nextConfig = {
   // for lockfiles, and an unrelated package-lock.json in a parent dir (e.g.
   // the user's home) makes it trace the wrong tree and warn on every build.
   outputFileTracingRoot: __dirname,
+  // Don't advertise the framework/version to scanners.
+  poweredByHeader: false,
   // `npm run lint` and `npx tsc --noEmit` are run explicitly in CI/release
   // checks. Skipping the duplicate build-time pass keeps production builds from
   // doing the same expensive work twice, especially now the app carries native
@@ -59,6 +61,23 @@ const nextConfig = {
   async headers() {
     return [
       {
+        // Baseline hardening for every response. The dashboard is an admin
+        // console: it must never be framed by another site (clickjacking on
+        // "Delete", "Revoke key", "Update now"), and nothing it serves should
+        // leak full URLs in Referer headers.
+        source: "/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Permissions-Policy",
+            value: "camera=(), microphone=(), geolocation=(), payment=()",
+          },
+        ],
+      },
+      {
         // The renderer paints these files into a <canvas> and exports it with
         // toDataURL(). Its page is built with setContent(), so it has an OPAQUE
         // origin — every /storage image is cross-origin, and drawing one
@@ -76,6 +95,9 @@ const nextConfig = {
         source: "/storage/:path*",
         headers: [
           { key: "Access-Control-Allow-Origin", value: "*" },
+          // Cache-Control is NOT set here: it depends on MEDIA_ACCESS, which is
+          // a runtime setting, while this block is fixed at build time. The
+          // /storage route sets it (public+immutable, or private+no-store).
           // nosniff stops the browser MIME-sniffing user-supplied bytes into
           // something executable. Safe on every stored type, so it applies to
           // all of them. It has to be declared HERE for the same reason as the

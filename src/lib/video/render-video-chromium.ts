@@ -1,3 +1,5 @@
+import { RENDER_ORIGIN, RENDER_CSP } from "@/lib/security/render-page";
+import { renderSignal } from "@/lib/security/render-budget";
 /**
  * Legacy video renderer: Chromium paints every output frame.
  *
@@ -16,12 +18,12 @@
  *    encoder strictly in frame order with bounded memory.
  */
 import { promises as fs } from "fs";
-import { once } from "events";
 import os from "os";
 import path from "path";
 import sharp from "sharp";
 import type { Page } from "playwright";
 import { config } from "@/lib/config";
+import { createArtworkVerifier } from "@/lib/design/loaded-artwork";
 import { buildFontHead, getBrowser, getFabricSource, type CustomFontRef } from "@/lib/render/render-image";
 import { sourceTimeForFrame } from "./timeline";
 import { decodeLayerFrames, type DecodedLayer } from "./decode";
@@ -45,7 +47,7 @@ const VIDEO_RENDER_TIMEOUT_MS = config.VIDEO_RENDER_TIMEOUT_MS;
 /** Parallel render pages: VIDEO_FRAME_WORKERS, defaulting to the CPU count. */
 export function frameWorkerCount(frameCount: number): number {
   const configured = config.VIDEO_FRAME_WORKERS > 0 ? config.VIDEO_FRAME_WORKERS : Math.max(1, os.cpus().length);
-  return Math.max(1, Math.min(configured, frameCount));
+  return Math.max(1, Math.min(configured, frameCount, 8));
 }
 
 function collectFamilies(designJson: any): string[] {
@@ -61,7 +63,8 @@ function collectFamilies(designJson: any): string[] {
 }
 
 async function writeWithBackpressure(stream: NodeJS.WritableStream, chunk: Buffer) {
-  if (!stream.write(chunk)) await once(stream, "drain");
+  renderSignal()?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => stream.write(chunk, (error) => error ? reject(error) : resolve()));
 }
 
 function frameUrlForFrame(decoded: DecodedLayer, timeline: PreparedVideoRender["timeline"], frameIdx: number): string | null {
@@ -79,16 +82,17 @@ export async function setupRenderPage(
 ): Promise<void> {
   const fontHead = buildFontHead(params.families, params.customFonts);
   const fabric = await getFabricSource();
-  const base = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+  const base = RENDER_ORIGIN;
   await page.setContent(
-    `<!doctype html><html><head><meta charset="utf-8"><base href="${base}/">
+    `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${RENDER_CSP}"><base href="${base}/">
      <style>html,body{margin:0;padding:0;background:#fff}</style>${fontHead}<script>/* Identity shim for esbuild-based runners (see render-image.ts). */window.__name = window.__name || (function (f) { return f; });</script><script>${fabric}</script></head>
      <body><canvas id="c"></canvas></body></html>`,
     { waitUntil: "load" }
   );
 
+  const verify = await page.evaluateHandle(createArtworkVerifier);
   await page.evaluate(
-    async ({ designJson, width, height, background, families }: any) => {
+    async ({ designJson, width, height, background, families, verify }: any) => {
       const f = (window as any).fabric;
       const el = document.getElementById("c") as HTMLCanvasElement;
       const canvas = new f.StaticCanvas(el, { width, height, enableRetinaScaling: false });
@@ -113,6 +117,7 @@ export async function setupRenderPage(
       };
       markCors(designJson?.objects);
       await canvas.loadFromJSON(designJson);
+      verify(designJson, canvas);
       const map = new Map<string, any>();
       const walk = (objs: any[], prefix: string) => {
         objs.forEach((o, i) => {
@@ -123,7 +128,7 @@ export async function setupRenderPage(
             o.__originalOpacity = o.opacity ?? 1;
             o.objectCaching = false;
           }
-          if (o.objects) walk(o.objects, p);
+          if (typeof o.getObjects === "function") walk(o.getObjects(), p);
         });
       };
       walk(canvas.getObjects(), "");
@@ -136,6 +141,7 @@ export async function setupRenderPage(
       height: params.height,
       background: params.background,
       families: params.families,
+      verify,
     }
   );
 }
@@ -191,6 +197,7 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
   const tmpDir = ctx.tmpDir;
   const outPath = path.join(tmpDir, "out.mp4");
   let encoder: ReturnType<typeof startMp4Encoder> | null = null;
+  let encoderClosed: Promise<number | null> | undefined;
   let pool: Awaited<ReturnType<typeof createFrameRenderPool>> | null = null;
 
   try {
@@ -205,6 +212,7 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
     const families = collectFamilies(ctx.designJson);
     pool = await createFrameRenderPool({
       size: frameWorkerCount(timeline.frameCount),
+      frames: {uid: ctx.uid, root: ctx.tmpDir},
       timeoutMs: VIDEO_RENDER_TIMEOUT_MS,
       setupPage: (page) =>
         setupRenderPage(page, {
@@ -240,8 +248,12 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
       encoder: ctx.encoder,
     });
     let encoderStderr = "";
+    // Register before writing: abort/early exit can precede stdin.end().
+    encoderClosed = new Promise(resolve => encoder!.once("close", resolve));
+    encoder.on("error", () => {}); // close also fires on spawn errors
+    encoder.stdin.on("error", () => {}); // propagated by stream.write below
     encoder.stderr.setEncoding("utf8");
-    encoder.stderr.on("data", (chunk) => (encoderStderr += chunk));
+    encoder.stderr.on("data", (chunk) => (encoderStderr = (encoderStderr + chunk).slice(-8192)));
 
     let firstFrame: Buffer | null = null;
     const pipeline = new OrderedFramePipeline<Buffer>({
@@ -264,7 +276,7 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
     await pipeline.run(timeline.frameCount);
 
     encoder.stdin.end();
-    const [code] = (await once(encoder, "close")) as [number | null];
+    const code = await encoderClosed;
     encoder = null;
     if (code !== 0) throw new Error(`ffmpeg MP4 encode failed${encoderStderr.trim() ? `: ${encoderStderr.trim()}` : ""}`);
     await ctx.onProgress?.(99);
@@ -274,6 +286,7 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
     return { buffer, posterBuffer, durationSec: timeline.durationSec, fps: timeline.fps, frameCount: timeline.frameCount, warnings: ctx.warnings };
   } finally {
     if (pool) await pool.close().catch(() => undefined);
-    if (encoder && !encoder.killed) encoder.kill("SIGKILL");
+    if (encoder && encoder.exitCode === null && !encoder.killed) encoder.kill("SIGKILL");
+    await encoderClosed;
   }
 }

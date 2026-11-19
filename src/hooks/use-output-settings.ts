@@ -9,7 +9,7 @@ import {
 
 export interface ProjectSettings {
   webhookUrl?: string | null;
-  webhookSecret?: string | null;
+  hasWebhookSecret?: boolean;
   defaultFormat?: string | null;
   defaultQuality?: number | null;
   defaultScale?: number | null;

@@ -16,7 +16,7 @@ import { assets } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { inlineExternalImages } from "./inline-images";
 import { inlineFontSources } from "./inline-fonts";
-import type { CustomFontRef } from "./render-image";
+import { collectFamilies, type CustomFontRef } from "./render-image";
 
 export interface PreparedDesign {
   designJson: any;
@@ -34,11 +34,12 @@ export async function prepareDesignForRender(
     .from(assets)
     .where(and(eq(assets.projectId, projectId), eq(assets.type, "font")));
 
+  const needed = new Set(collectFamilies(prepared));
   const customFonts = await inlineFontSources(
     fontAssets.map((a: any) => ({
       family: a.name.replace(/\.[^.]+$/, ""),
       url: a.url,
-    }))
+    })).filter(f => needed.has(f.family))
   );
 
   return { designJson: prepared, customFonts };

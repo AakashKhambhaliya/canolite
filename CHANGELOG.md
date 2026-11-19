@@ -4,6 +4,54 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.12.0
+
+**New Studio editor.** The template editor is rebuilt on Fabric 7 with a
+library panel, inspector, starter presets and bundled thumbnails. Saves are
+versioned: a save made from a stale tab returns 409 instead of overwriting
+newer work, and "Save as copy" keeps both. See `docs/studio-editor.md` and
+`docs/editor-release.md`.
+
+**Security hardening.**
+
+- **Setup wizard needs a token.** A fresh, publicly reachable instance can no
+  longer be claimed by whoever opens `/setup` first. Set
+  `CANOLITE_SETUP_TOKEN` (32+ chars), or use the one-time token printed in the
+  server log at startup. `install.sh` generates one and prints it.
+  `ADMIN_EMAIL`/`ADMIN_PASSWORD` still skip the wizard entirely.
+- **Optional private media.** `MEDIA_ACCESS=private` requires a session or API
+  key for `/storage` and only serves files the caller's project owns. It needs
+  an absolute `STORAGE_DIR` outside `public/`. Default stays `public`.
+- **Sandboxed renderer.** Render pages run in an isolated browser context that
+  can only load approved local media and Google Fonts; every other request,
+  navigation and WebSocket is blocked.
+- **SSRF-safe outbound fetches.** Remote images/fonts and webhooks resolve DNS
+  once, reject private/reserved addresses, pin the socket to the approved IP,
+  re-check every redirect and cap response size.
+- **Webhooks.** Signing secrets only sign the saved receiver URL (never a
+  per-request `webhook_url` override), require HTTPS, and are cleared when the
+  receiver changes. Signed webhooks no longer follow redirects.
+- **Render limits.** Global/video concurrency gates with bounded backlogs,
+  per-render deadlines, a 4 MiB request body cap and a 1,000-job backlog per
+  project.
+- **Database TLS is verified.** Remote PostgreSQL connections now use
+  `verify-full` instead of accepting any certificate. Use `DB_SSL_CA_FILE` for
+  a private CA, or `DB_SSL=disable` only on a trusted private network.
+- App-wide security headers: `X-Frame-Options: DENY`,
+  `frame-ancestors 'none'`, `nosniff`, a strict `Referrer-Policy`, a
+  `Permissions-Policy`, and no `X-Powered-By`.
+- Render retry only applies to failed jobs; deleting a render whose files
+  cannot be removed is reported and retried instead of silently orphaning
+  them.
+
+**Upgrade notes.**
+
+- Webhooks configured with a signing secret on a plain `http://` URL stop
+  delivering. Switch the receiver to HTTPS (or remove the secret).
+- Managed PostgreSQL with a non-public CA needs `DB_SSL_CA_FILE`.
+- Public `/storage` files are cached as immutable again (`MEDIA_ACCESS=public`);
+  private media is always `no-store`.
+
 ## v1.11.0
 
 **One set of output settings, everywhere.**

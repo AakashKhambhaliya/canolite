@@ -1,3 +1,6 @@
+import { privateMedia, projectOwnsMedia } from "@/lib/security/media-access";
+import { getCurrentUser } from "@/lib/auth";
+import { authenticateApiKey } from "@/lib/api-auth";
 import { NextResponse } from "next/server";
 import { createReadStream, promises as fs } from "fs";
 import { Readable } from "stream";
@@ -84,10 +87,18 @@ export async function GET(
   const { path: parts } = await params;
   const key = (parts || []).join("/");
 
+  if (parts.some(p => !p || p === "." || p === ".." || /[\/\\\x00-\x1f]/.test(p)) || parts[0] === "tmp") return new NextResponse("Not found", {status:404});
+  if (privateMedia()) {
+    const auth = req.headers.has("authorization") ? await authenticateApiKey(req) : await getCurrentUser();
+    if (!auth || !("projectId" in auth)) return new NextResponse("Not authenticated", {status:401, headers:{"Cache-Control":"private, no-store"}});
+    if (!(await projectOwnsMedia(auth.projectId,key))) return new NextResponse("Not found", {status:404,headers:{"Cache-Control":"private, no-store"}});
+  }
   let filePath: string;
   try {
     // Traversal-checked: throws if the key escapes the storage root.
-    filePath = storageFilePath(key);
+    const root = await fs.realpath(storageFilePath(""));
+    filePath = await fs.realpath(storageFilePath(key));
+    if (!filePath.startsWith(root + path.sep)) throw new Error("Invalid media path");
   } catch {
     return new NextResponse("Not found", { status: 404 });
   }
@@ -104,8 +115,11 @@ export async function GET(
   const ext = path.extname(filePath).slice(1).toLowerCase();
   const headers: Record<string, string> = {
     "Content-Type": MIME[ext] || "application/octet-stream",
-    // Keys are unique per render/upload, so the bytes never change.
-    "Cache-Control": "public, max-age=31536000, immutable",
+    // Keys are unique per render/upload, so public bytes never change and can
+    // be cached forever. Private media must never land in a shared cache.
+    ...(privateMedia()
+      ? { "Cache-Control": "private, no-store", Vary: "Cookie, Authorization" }
+      : { "Cache-Control": "public, max-age=31536000, immutable" }),
     // Advertised even on a full response — it is how a player learns it may
     // seek at all.
     "Accept-Ranges": "bytes",

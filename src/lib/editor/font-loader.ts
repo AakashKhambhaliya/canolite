@@ -54,11 +54,9 @@ export async function ensureFont(family: string): Promise<void> {
   if (inflight.has(family)) return inflight.get(family)!;
 
   const p = (async () => {
-    if (GOOGLE_FAMILY_SET.has(family)) {
-      await loadGoogleFont(family);
-    }
-    // Custom fonts are registered separately via registerCustomFont().
-    loaded.add(family);
+    // An unknown family may be an uploaded font still being listed. Do not
+    // mark it loaded and prevent its actual FontFace from being registered.
+    if (GOOGLE_FAMILY_SET.has(family)) await loadGoogleFont(family);
   })();
 
   inflight.set(family, p);
@@ -73,34 +71,49 @@ export async function ensureFont(family: string): Promise<void> {
 export async function loadGoogleFont(family: string): Promise<void> {
   if (typeof document === "undefined") return;
   const id = `gf-${family}`;
-  if (!document.getElementById(id)) {
+  let link = document.getElementById(id) as HTMLLinkElement | null;
+  if (!link) {
     const weights = GOOGLE_WEIGHTS.get(family) || [400, 700];
-    const axis = weights.join(";");
-    const link = document.createElement("link");
+    link = document.createElement("link");
     link.id = id;
     link.rel = "stylesheet";
-    link.href = `https://fonts.googleapis.com/css2?family=${familyToParam(
-      family
-    )}:wght@${axis}&display=swap`;
-    document.head.appendChild(link);
+    link.href = `https://fonts.googleapis.com/css2?family=${familyToParam(family)}:wght@${weights.join(";")}&display=swap`;
+    const element = link;
+    const ready = new Promise<boolean>((resolve) => {
+      const finish = (ok: boolean) => {
+        clearTimeout(timer);
+        element.onload = element.onerror = null;
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), 5000);
+      element.onload = () => finish(true);
+      element.onerror = () => finish(false);
+    });
+    document.head.appendChild(element);
+    if (!(await ready)) {
+      element.remove();
+      return;
+    }
   }
   await waitForFont(family);
+  if (document.fonts.check(`16px "${family}"`)) loaded.add(family);
 }
 
-/** Register an uploaded custom font from a file URL. */
+const customFaces = new Map<string, { url: string; face: FontFace }>();
+/** Register/re-register the bytes actually returned for this project. */
 export async function registerCustomFont(
   family: string,
-  url: string
+  url: string,
 ): Promise<void> {
-  if (typeof document === "undefined" || loaded.has(family)) return;
-  try {
-    const face = new FontFace(family, `url(${url})`);
-    await face.load();
-    (document as any).fonts.add(face);
-    loaded.add(family);
-  } catch (e) {
-    console.error(`Failed to load custom font "${family}":`, e);
-  }
+  if (typeof document === "undefined" || customFaces.get(family)?.url === url)
+    return;
+  const face = new FontFace(family, `url(${JSON.stringify(url)})`);
+  await face.load();
+  const previous = customFaces.get(family);
+  if (previous) document.fonts.delete(previous.face);
+  document.fonts.add(face);
+  customFaces.set(family, { url, face });
+  loaded.add(family);
 }
 
 async function waitForFont(family: string): Promise<void> {

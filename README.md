@@ -10,7 +10,7 @@
 
 ## Features
 
-- 🎨 **Visual Template Editor** — Fabric.js drag-and-drop editor with text, images, shapes, **video layers**, **layer reordering**, **alignment/snapping guides**, **all Google Fonts + custom font upload**
+- 🎨 **[Studio editor](docs/studio-editor.md)** — a canvas-first Fabric.js workspace with six editable starter designs, a searchable template library, contextual formatting, layers, snapping guides, Google/custom fonts and video layers. Open a template from the Templates dashboard; the rest of the app is unchanged. See the [release and deployment checklist](docs/editor-release.md).
 - 🎬 **Video templates → MP4** — Drop in an MP4/WebM/MOV, trim it, set when it starts, loop and mute it, then export the whole design as H.264 video with every other layer composited on top. ffmpeg ships with the app
 - 🔗 **REST API** — Bannerbear-style API for single and batch image **and video** generation
 - 🔌 **n8n integration** — Official [community node](https://www.npmjs.com/package/n8n-nodes-canolite) to generate images from your automation workflows
@@ -126,6 +126,11 @@ Canolite is a **single-admin, self-hosted** tool — there's no public sign-up.
 On first launch you create the admin account (email + password) in a **one-time
 setup wizard**. After that you sign in with those credentials, and can change
 the password anytime from **Settings** (it re-verifies your current password).
+
+The wizard asks for a **setup token** so nobody else can claim a freshly started
+instance. Set `CANOLITE_SETUP_TOKEN` (32+ characters, e.g. `openssl rand -hex 32`),
+or leave it unset and copy the one-time token printed in the server log at
+startup (`docker compose logs canolite`). `install.sh` generates one for you.
 
 **Headless / Docker:** set both env vars to auto-provision the admin on boot and
 skip the wizard:
@@ -331,9 +336,12 @@ If `DATABASE_URL` is unset, Canolite starts embedded PostgreSQL on `127.0.0.1` u
 | `PGDATA_DIR` | `./data/pgdata` | Data directory for embedded PostgreSQL when `DATABASE_URL` is unset. Docker sets `/app/data/pgdata`. |
 | `PGPORT` | `54329` | Local loopback port for embedded PostgreSQL. Uses 54329 rather than 5432 to avoid clashing with system Postgres. |
 | `DB_POOL_MAX` | `10` | Maximum node-postgres pool connections per process. The web app and `npm run worker` are separate processes and each gets its own pool. |
-| `DB_SSL` | auto | For non-local PostgreSQL hosts, SSL is enabled automatically. Set `DB_SSL=disable` only for trusted private networks that do not support SSL. |
+| `DB_SSL` | auto | For non-local PostgreSQL hosts, verified TLS (`verify-full`) is enabled automatically. Set `DB_SSL=disable` only for trusted private networks that do not support TLS. |
+| `DB_SSL_CA_FILE` | — | CA bundle used to verify a remote PostgreSQL server with a private CA. |
 | `ADMIN_EMAIL` | — | Optional: auto-provision admin email on boot (skips the setup wizard) |
 | `ADMIN_PASSWORD` | — | Optional: auto-provision admin password on boot (skips the setup wizard) |
+| `CANOLITE_SETUP_TOKEN` | generated | Token the setup wizard requires (32+ chars). When unset, a one-time token is printed in the server log at startup. |
+| `MEDIA_ACCESS` | `public` | `private` requires sign-in or an API key for `/storage` files (needs an absolute `STORAGE_DIR` outside `public/`). |
 | `STORAGE_DIR` | `public/storage` | Where rendered output and uploads are written. Docker sets `/app/data/storage`. |
 | `BACKUP_DIR` | `./.backups` | Where pre-migration database backups are written. Falls back to `/app/data/backups` automatically when that directory exists (i.e. in Docker). |
 | `RENDER_CONCURRENCY` | `3` | Maximum in-process image renders at once |

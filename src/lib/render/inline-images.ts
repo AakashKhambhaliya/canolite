@@ -1,3 +1,4 @@
+import { renderSignal } from "@/lib/security/render-budget";
 /**
  * Inline external image sources before rendering.
  *
@@ -20,8 +21,8 @@
  * API result matches the template.
  */
 import sharp from "sharp";
-import { safeFetch } from "@/lib/ssrf";
-import { walkDesignObjects } from "@/lib/design/walk";
+import { fetchPublic } from "@/lib/ssrf";
+import type { ImageDesignObject } from "@/lib/design/types";
 import { isImage } from "@/lib/design/predicates";
 
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25 MB
@@ -99,57 +100,19 @@ function sniffImageType(buf: Buffer): string | null {
 }
 
 interface FetchedImage {
+  byteLength: number;
   dataUrl: string;
   /** Intrinsic pixel dimensions, when they could be determined. */
   width?: number;
   height?: number;
 }
 
-async function fetchImage(url: string): Promise<FetchedImage> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res: Response;
-  try {
-    // safeFetch re-validates every redirect hop against the SSRF guard, not
-    // just this original URL — a plain `fetch(url, { redirect: "follow" })`
-    // would let a URL that passes the check 302 to an internal address.
-    res = await safeFetch(url, {
-      signal: controller.signal,
-      headers: {
-        // Some hosts (incl. Google Drive) reject requests without a UA.
-        "User-Agent":
-          "Mozilla/5.0 (compatible; CanoliteRenderer/1.0; +https://github.com/canolite)",
-        Accept: "image/*,*/*;q=0.8",
-      },
-    });
-  } catch (err: any) {
-    if (err?.name === "AbortError") {
-      throw new Error(`Timed out fetching image: ${url}`);
-    }
-    throw new Error(`Failed to fetch image: ${url}`);
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (!res.ok) {
-    throw new Error(`Failed to fetch image (HTTP ${res.status}): ${url}`);
-  }
-
-  const lenHeader = res.headers.get("content-length");
-  if (lenHeader && Number(lenHeader) > MAX_IMAGE_BYTES) {
-    throw new Error(`Image is too large (max 25MB): ${url}`);
-  }
-
-  const contentType = (res.headers.get("content-type") || "")
-    .split(";")[0]
-    .trim()
-    .toLowerCase();
-  const buf = Buffer.from(await res.arrayBuffer());
-
-  if (buf.byteLength > MAX_IMAGE_BYTES) {
-    throw new Error(`Image is too large (max 25MB): ${url}`);
-  }
-
+async function fetchImage(url: string, maxBytes: number): Promise<FetchedImage> {
+  const res = await fetchPublic(url, { signal: renderSignal(), timeoutMs: FETCH_TIMEOUT_MS, maxBytes,
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; CanoliteRenderer/1.0)", Accept: "image/*,*/*;q=0.8" } });
+  if (!res.ok) throw new Error(`Remote image returned HTTP ${res.status}`);
+  const contentType = (res.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  const buf = res.bytes;
   const type = contentType.startsWith("image/") ? contentType : sniffImageType(buf);
   if (!type) {
     throw new Error(
@@ -172,7 +135,8 @@ async function fetchImage(url: string): Promise<FetchedImage> {
     // Non-raster (e.g. some SVGs) — fall back to no re-fit.
   }
 
-  return { dataUrl: `data:${type};base64,${buf.toString("base64")}`, width, height };
+  if (width && height && (width * height > 32_000_000 || Math.max(width,height) > 16384)) throw new Error("Remote image exceeds pixel budget");
+  return { byteLength: buf.length, dataUrl: `data:${type};base64,${buf.toString("base64")}`, width, height };
 }
 
 /**
@@ -183,33 +147,38 @@ async function fetchImage(url: string): Promise<FetchedImage> {
 export async function inlineExternalImages(designJson: any): Promise<any> {
   const json = JSON.parse(JSON.stringify(designJson));
 
-  // Rewrite already-absolutized same-origin storage URLs back to root-relative
-  // FIRST, so they are never mistaken for external URLs below.
-  walkDesignObjects(json, ({ object: obj }) => {
-    if (!isImage(obj)) return;
+  // Group children, clip paths, and canvas-level images all use the same
+  // storage and CORS rules. Background-only art must render, too.
+  const images: ImageDesignObject[] = [];
+  const collect = (o: any) => {
+    if (!o || typeof o !== "object") return;
+    if (isImage(o)) images.push(o);
+    if (Array.isArray(o.objects)) o.objects.forEach(collect);
+    for (const key of ["backgroundImage", "overlayImage", "clipPath"]) collect(o[key]);
+  };
+  collect(json);
+  const urls = new Set<string>();
+  for (const obj of images) {
+    obj.crossOrigin = "anonymous";
     const relative = selfStoragePath(obj.src);
     if (relative) obj.src = relative;
-  });
-
-  const urls = new Set<string>();
-  walkDesignObjects(json, ({ object: obj }) => {
-    if (isImage(obj) && isExternalHttp(obj.src)) {
-      urls.add(obj.src);
-    }
-  });
+    if (isExternalHttp(obj.src)) urls.add(obj.src);
+  }
 
   if (urls.size === 0) return json;
 
   const resolved = new Map<string, FetchedImage>();
-  await Promise.all(
-    Array.from(urls).map(async (url) => {
-      resolved.set(url, await fetchImage(url));
-    })
-  );
+  if (urls.size > 64) throw new Error("Too many external media sources in one render");
+  let remaining = 64 * 1024 * 1024;
+  for (const url of urls) {
+    const image = await fetchImage(url, Math.min(MAX_IMAGE_BYTES, remaining));
+    remaining -= image.byteLength;
+    resolved.set(url, image);
+  }
 
-  walkDesignObjects(json, ({ object: obj }) => {
+  for (const obj of images) {
     const src = obj.src;
-    if (isImage(obj) && src && resolved.has(src)) {
+    if (src && resolved.has(src)) {
       const img = resolved.get(src)!;
 
       // Box the template laid out for the original image (display size).
@@ -230,7 +199,7 @@ export async function inlineExternalImages(designJson: any): Promise<any> {
         obj.cropY = 0;
       }
     }
-  });
+  }
 
   return json;
 }

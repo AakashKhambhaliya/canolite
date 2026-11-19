@@ -1,3 +1,4 @@
+import { databaseTransport } from "../../scripts/db-transport.cjs";
 import { existsSync } from "fs";
 import path from "path";
 import { spawn } from "child_process";
@@ -56,29 +57,6 @@ function dbIdleTimeoutMillis(): number {
 function dbConnectionTimeoutMillis(): number {
   const parsed = Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10_000);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 10_000;
-}
-
-function isLocalDatabaseHost(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
-}
-
-function pgSslOption(connectionString: string): false | { rejectUnauthorized: boolean } {
-  const raw = (process.env.DB_SSL || "").toLowerCase();
-  if (raw === "disable" || raw === "false" || raw === "0") return false;
-  if (raw === "require" || raw === "true" || raw === "1") {
-    return { rejectUnauthorized: false };
-  }
-  try {
-    const url = new URL(connectionString);
-    return isLocalDatabaseHost(url.hostname) ? false : { rejectUnauthorized: false };
-  } catch {
-    return false;
-  }
 }
 
 function assertDatabaseConfig(): void {
@@ -141,12 +119,27 @@ function buildDb(connectionString: string) {
   try {
     const { Pool } = require("pg");
     const { drizzle } = require("drizzle-orm/node-postgres");
+    const transport = databaseTransport(connectionString);
     const pool = new Pool({
-      connectionString,
+      connectionString: transport.connectionString,
       max: dbPoolMax(),
       idleTimeoutMillis: dbIdleTimeoutMillis(),
       connectionTimeoutMillis: dbConnectionTimeoutMillis(),
-      ssl: pgSslOption(connectionString),
+      ssl: transport.ssl,
+    });
+    // Timestamp columns are `timestamp without time zone`. Values written from
+    // JS are serialised as UTC, but `defaultNow()` / `now()` are evaluated in
+    // the SESSION time zone — which for embedded Postgres is the host's local
+    // zone. On a non-UTC host every DB-defaulted `created_at` was therefore
+    // shifted by the UTC offset (and read back as if it were UTC), skewing API
+    // timestamps and retention cleanup. Pin each session to UTC.
+    // A query queued on 'connect' runs before any query the pool hands out on
+    // that client. Done as a SET (not a startup `options` parameter) so it also
+    // works through PgBouncer-style poolers that reject startup options.
+    pool.on("connect", (client: { query: (sql: string) => Promise<unknown> }) => {
+      client.query("SET TIME ZONE 'UTC'").catch((error) =>
+        console.error("[db] Could not set session time zone to UTC:", error)
+      );
     });
     globalForDb.__canolitePgPool = pool;
     globalForDb.__canoliteDatabaseUrl = connectionString;

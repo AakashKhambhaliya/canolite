@@ -33,6 +33,7 @@ export async function POST(
       .where(
         and(
           eq(renderJobs.id, id),
+          eq(renderJobs.status, "failed"),
           eq(renderJobs.projectId, user.projectId)
         )
       )
@@ -40,7 +41,7 @@ export async function POST(
 
     if (!job) {
       return NextResponse.json(
-        { error: "Render job not found" },
+        { error: "No failed job available for retry" },
         { status: 404 }
       );
     }

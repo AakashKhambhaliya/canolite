@@ -1,3 +1,4 @@
+import { renderBody, RenderAdmissionError } from "@/lib/render/admission";
 import { NextResponse } from "next/server";
 import { authenticateApiKey } from "@/lib/api-auth";
 import { withCors, handleOptions } from "@/lib/cors";
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
   try {
     const auth = await authenticateApiKey(request);
     if (auth instanceof NextResponse) return withCors(auth);
-    const parsed = schema.safeParse(await request.json());
+    const parsed = schema.safeParse(await renderBody(request));
     if (!parsed.success) return withCors(NextResponse.json({ error: "Validation error", details: parsed.error.issues }, { status: 400 }));
     const { template_id, items, fps, duration, quality, scale } = parsed.data;
     for (const item of items) {
@@ -42,6 +43,7 @@ export async function POST(request: Request) {
     void processVideoBatch(created.uids);
     return withCors(NextResponse.json({ batch_uid: created.batchUid, uids: created.uids, count: created.uids.length, status: "queued", template_id, format: "mp4" }, { status: 202 }));
   } catch (error: any) {
+    if (error instanceof RenderAdmissionError) return withCors(NextResponse.json({error:error.message}, {status:error.status,headers:error.status === 429 ? {"Retry-After":"10"} : undefined}));
     console.error("Video batch API error:", error);
     return withCors(NextResponse.json({ error: error?.message || "Internal server error" }, { status: /does not contain video/i.test(error?.message || "") ? 400 : 500 }));
   }

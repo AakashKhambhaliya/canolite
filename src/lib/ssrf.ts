@@ -1,123 +1,104 @@
-import { lookup } from "dns/promises";
-import net from "net";
+/** Outbound transport for user-selected media and webhook destinations. Never
+ * hand a validated hostname back to an unconstrained resolver/proxy. */
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP, type LookupFunction } from "node:net";
+import http from "node:http";
+import https from "node:https";
 
-/**
- * Best-effort SSRF guard for user-supplied URLs (image sources, webhooks) that
- * the server itself fetches. Rejects non-http(s) schemes and any host that
- * resolves to a loopback / private / link-local / cloud-metadata address.
- *
- * Note: this does not fully defend against DNS rebinding (TOCTOU), but it
- * blocks the common cases (localhost, 10/172.16/192.168, 169.254.169.254, ::1).
- */
-function ipToLong(ip: string): number {
-  return ip
-    .split(".")
-    .reduce((acc, oct) => (acc << 8) + parseInt(oct, 10), 0) >>> 0;
+const reserved = new BlockList();
+for (const subnet of ["0/8", "10/8", "100.64/10", "127/8", "169.254/16", "172.16/12", "192.0.0/24", "192.0.2/24", "192.88.99/24", "192.168/16", "198.18/15", "198.51.100/24", "203.0.113/24", "224/4", "240/4"]) {
+  const [net, bits] = subnet.split("/");
+  reserved.addSubnet((net + ".0.0.0").split(".").slice(0, 4).join("."), Number(bits), "ipv4");
 }
+const globalV6 = new BlockList();
+globalV6.addSubnet("2000::", 3, "ipv6");
+for (const [net, bits] of [["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20]] as const) reserved.addSubnet(net, bits, "ipv6");
 
-function inRange(ip: string, cidr: string): boolean {
-  const [range, bitsStr] = cidr.split("/");
-  const bits = parseInt(bitsStr, 10);
-  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-  return (ipToLong(ip) & mask) === (ipToLong(range) & mask);
-}
-
-const PRIVATE_V4 = [
-  "0.0.0.0/8",
-  "10.0.0.0/8",
-  "100.64.0.0/10",
-  "127.0.0.0/8",
-  "169.254.0.0/16", // link-local + cloud metadata (169.254.169.254)
-  "172.16.0.0/12",
-  "192.0.0.0/24",
-  "192.168.0.0/16",
-  "198.18.0.0/15",
-  "224.0.0.0/4",
-  "240.0.0.0/4",
-];
-
-function isPrivateV4(ip: string): boolean {
-  return PRIVATE_V4.some((cidr) => inRange(ip, cidr));
-}
-
-function isPrivateV6(ip: string): boolean {
-  const a = ip.toLowerCase();
-  if (a === "::1" || a === "::") return true;
-  if (a.startsWith("fe80") || a.startsWith("fc") || a.startsWith("fd"))
-    return true;
-  if (a.startsWith("ff")) return true; // multicast
-  // IPv4-mapped (::ffff:a.b.c.d)
-  const mapped = a.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return isPrivateV4(mapped[1]);
-  return false;
-}
-
-const MAX_REDIRECTS = 5;
-
-/**
- * fetch() with the SSRF guard applied to *every* hop of a redirect chain, not
- * just the caller-supplied URL. `fetch(url, { redirect: "follow" })` (or the
- * default) follows redirects itself without re-checking each destination —
- * so a URL that passes isUrlSafe() can still respond with e.g.
- * `302 Location: http://169.254.169.254/...` and the guard never sees the
- * real destination. This fetches with `redirect: "manual"` and validates
- * each Location before following it.
- */
-export async function safeFetch(
-  url: string,
-  init: RequestInit = {}
-): Promise<Response> {
-  let current = url;
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    if (!(await isUrlSafe(current))) {
-      throw new Error(`URL is not allowed: ${current}`);
-    }
-    const res = await fetch(current, { ...init, redirect: "manual" });
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get("location");
-      if (!location) return res; // redirect with no Location — nothing to follow
-      current = new URL(location, current).toString();
-      continue;
-    }
-    return res;
+export function isPublicAddress(address: string): boolean {
+  if (address.includes("%")) return false;
+  switch (isIP(address)) {
+    case 4: return !reserved.check(address, "ipv4");
+    case 6: return globalV6.check(address, "ipv6") && !reserved.check(address, "ipv6");
+    default: return false;
   }
-  throw new Error(`Too many redirects fetching ${url}`);
 }
 
-export async function isUrlSafe(raw: string): Promise<boolean> {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return false;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+// Reject promptly on deadline even if the operating system's lookup is slow.
+function untilAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
 
+export async function publicTarget(url: URL, signal: AbortSignal, resolve = lookup) {
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  if (
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".local") ||
-    host.endsWith(".internal")
-  ) {
-    return false;
-  }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password || !host || /(?:^|\.)(?:localhost|internal|local)\.?$/i.test(host)) throw new Error("Destination is not public HTTP(S)");
+  const family = isIP(host);
+  if (!family && !host.includes(".")) throw new Error("A public hostname is required");
+  signal.throwIfAborted();
+  const addresses = family ? [{ address: host, family }] : await untilAbort(resolve(host, { all: true }), signal);
+  if (!addresses.length || addresses.some(a => !isPublicAddress(a.address) || a.family !== isIP(a.address))) throw new Error("Destination is not a public address");
+  return addresses.find(a => a.family === 4) || addresses[0];
+}
+export async function isUrlSafe(raw: string): Promise<boolean> {
+  try { await publicTarget(new URL(raw), AbortSignal.timeout(5000)); return true; } catch { return false; }
+}
 
-  let addresses: { address: string; family: number }[];
-  const literal = net.isIP(host);
-  if (literal) {
-    addresses = [{ address: host, family: literal }];
-  } else {
+export function pinnedLookup(target: {address: string; family: number}): LookupFunction {
+  return (_name, options, done) => {
+    if (options.all) done(null, [target]);
+    else done(null, target.address, target.family);
+  };
+}
+
+export async function readBounded(stream: AsyncIterable<Uint8Array>, limit: number): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    size += chunk.byteLength;
+    if (size > limit) throw new Error("Remote response exceeds byte limit");
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, size);
+}
+
+type Options = { maxBytes: number; timeoutMs: number; signal?: AbortSignal; headers?: Record<string,string>; body?: string; allowUrl?: (url: URL) => boolean };
+export async function fetchPublic(raw: string, opts: Options) {
+  const deadline = AbortSignal.timeout(opts.timeoutMs);
+  const signal = opts.signal ? AbortSignal.any([deadline, opts.signal]) : deadline;
+  let url = new URL(raw);
+  for (let hop = 0; hop <= 5; hop++) {
+    if (opts.allowUrl && !opts.allowUrl(url)) throw new Error("Destination not permitted");
+    const target = await publicTarget(url, signal);
+    // Use the original hostname for Host, SNI and TLS identity, but ONLY the
+    // approved numeric address for the socket. Never reuse an unpinned agent.
+    const res = await new Promise<http.IncomingMessage>((resolve, reject) => {
+      const request = (url.protocol === "https:" ? https : http).request(url, {
+        method: opts.body === undefined ? "GET" : "POST", headers: { ...opts.headers, "Accept-Encoding": "identity" },
+        family: target.family, lookup: pinnedLookup(target), agent: false, rejectUnauthorized: true, signal,
+      }, resolve);
+      request.on("error", reject);
+      request.end(opts.body);
+    });
     try {
-      addresses = await lookup(host, { all: true });
-    } catch {
-      return false;
-    }
+      const status = res.statusCode || 502;
+      if (status >= 300 && status < 400 && res.headers.location) {
+        // Never forward callback data/signatures, even to another public host.
+        if (opts.body !== undefined) throw new Error("Webhook redirects are not accepted");
+        url = new URL(res.headers.location, url);
+        continue;
+      }
+      const ok = status >= 200 && status < 300;
+      if (!ok || opts.body !== undefined) return { ok, status, headers: res.headers, bytes: Buffer.alloc(0) };
+      if (Number(res.headers["content-length"]) > opts.maxBytes) throw new Error("Remote response exceeds byte limit");
+      if (res.headers["content-encoding"] && res.headers["content-encoding"] !== "identity") throw new Error("Unexpected response encoding");
+      const bytes = await readBounded(res, opts.maxBytes);
+      signal.throwIfAborted();
+      return { ok, status, headers: res.headers, bytes };
+    } finally { res.destroy(); }
   }
-
-  for (const a of addresses) {
-    if (a.family === 4 && isPrivateV4(a.address)) return false;
-    if (a.family === 6 && isPrivateV6(a.address)) return false;
-  }
-  return true;
+  throw new Error("Too many remote redirects");
 }

@@ -77,6 +77,10 @@ export function DashboardShell({ children, user }: DashboardShellProps) {
     return pathname.startsWith(href);
   };
 
+  // The editor owns its workspace chrome. Keep the authenticated layout,
+  // but do not nest a second dashboard sidebar around the canvas.
+  if (pathname.startsWith("/editor/")) return <>{children}</>;
+
   return (
     <TooltipProvider delayDuration={0}>
       <div className="flex h-screen overflow-hidden bg-gray-50 dark:bg-gray-950">

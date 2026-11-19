@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import transport from './db-transport.cjs';
 import fs from "fs/promises";
 import path from "path";
 import pg from "pg";
@@ -47,7 +48,7 @@ async function main() {
   const databaseUrl = process.env.DATABASE_URL || `postgres://canolite:canolite@127.0.0.1:${process.env.PGPORT || 54329}/canolite`;
   const PGlite = await loadPglite();
   const source = new PGlite(oldDir);
-  const target = new pg.Client({ connectionString: databaseUrl, ssl: false });
+  const target = new pg.Client(transport.databaseTransport(databaseUrl));
   await target.connect();
 
   try {

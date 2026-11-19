@@ -1,3 +1,4 @@
+import { renderBody, RenderAdmissionError } from "@/lib/render/admission";
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { renderJobs } from "@/db/schema";
@@ -18,7 +19,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const body = await request.json();
+    const body = await renderBody(request);
     const { template_id, modifications, format, quality, scale } = body;
     if (!template_id) {
       return NextResponse.json(
@@ -85,6 +86,7 @@ export async function POST(request: Request) {
       created_at: created.job.createdAt,
     });
   } catch (error) {
+    if (error instanceof RenderAdmissionError) return NextResponse.json({error:error.message}, {status:error.status,headers:error.status === 429 ? {"Retry-After":"10"} : undefined});
     console.error("Error creating render:", error);
     return NextResponse.json(
       { error: "Internal server error" },

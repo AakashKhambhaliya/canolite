@@ -20,6 +20,7 @@ import { Logo } from "@/components/logo";
 export default function SetupPage() {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
+  const [setupToken, setSetupToken] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -63,7 +64,7 @@ export default function SetupPage() {
       const res = await fetch("/api/auth/setup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, setupToken }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -123,6 +124,15 @@ export default function SetupPage() {
       </CardHeader>
       <form onSubmit={handleSubmit}>
         <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="setup-token">Operator setup token</Label>
+            <Input id="setup-token" type="password" autoComplete="off" required maxLength={4096}
+              value={setupToken} onChange={(e) => setSetupToken(e.target.value)} disabled={isLoading} />
+            <p className="text-xs text-muted-foreground">
+              Your CANOLITE_SETUP_TOKEN, or the one-time token printed in the
+              server log at startup (e.g. <code>docker compose logs canolite</code>).
+            </p>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="email">Admin email</Label>
             <Input

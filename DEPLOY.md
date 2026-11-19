@@ -17,7 +17,9 @@ so you persist exactly one volume.
 
 **Resources:** rendering launches Chromium, so give it **≥ 1 GB RAM** (2 GB
 comfortable). The image is ~1 GB (includes Chromium). On first boot you'll see a
-**setup wizard** to create the admin account.
+**setup wizard** to create the admin account. It asks for a setup token: set
+`CANOLITE_SETUP_TOKEN` (32+ chars), or copy the one-time token printed in the
+container log at startup.
 
 ---
 
@@ -317,6 +319,8 @@ When `DATABASE_URL` is unset, Canolite starts embedded PostgreSQL on `127.0.0.1`
 | `BACKUP_DIR` | `/app/data/backups` (`.backups` without Docker) | Where automatic backups are written. |
 | `APP_URL` | `http://localhost:3000` | Public base URL used to build absolute image URLs. |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | — | Recovery net: auto-provision the admin on boot if the DB is empty. |
+| `CANOLITE_SETUP_TOKEN` | generated | Token the setup wizard requires (32+ chars). When unset, a one-time token is printed in the log at startup. |
+| `MEDIA_ACCESS` | `public` | `private` requires sign-in or an API key for `/storage` (needs an absolute `STORAGE_DIR` outside `public/`). |
 | `DATABASE_URL` | unset | External PostgreSQL URL. When unset, embedded PostgreSQL starts on `127.0.0.1`. Production should use managed/external PostgreSQL. |
 | `PGDATA_DIR` | `./data/pgdata` (`/app/data/pgdata` in Docker) | Data directory for embedded PostgreSQL. |
 | `PGPORT` | `54329` | Local loopback port for embedded PostgreSQL. |

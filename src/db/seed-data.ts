@@ -1,7 +1,7 @@
 import * as schema from "./schema";
 import { v4 as uuidv4 } from "uuid";
 import bcrypt from "bcryptjs";
-import { asc, eq, isNotNull } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull } from "drizzle-orm";
 import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
@@ -129,6 +129,7 @@ export async function autoProvisionAdminFromEnv(db: any): Promise<void> {
     .limit(1);
   if (!admin || admin.passwordHash) return;
 
+  if (password.length < 8 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) throw new Error("Provide a valid ADMIN_EMAIL and an ADMIN_PASSWORD of at least 8 characters");
   const passwordHash = await bcrypt.hash(password, 12);
   await db
     .update(schema.users)
@@ -137,7 +138,7 @@ export async function autoProvisionAdminFromEnv(db: any): Promise<void> {
       passwordHash,
       updatedAt: new Date(),
     })
-    .where(eq(schema.users.id, admin.id));
+    .where(and(eq(schema.users.id, admin.id), isNull(schema.users.passwordHash)));
   console.log("✅ Admin auto-provisioned from ADMIN_EMAIL/ADMIN_PASSWORD");
   writeInstanceMarker();
 }

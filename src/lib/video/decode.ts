@@ -1,7 +1,10 @@
+import { privateMedia, projectOwnsMedia } from "@/lib/security/media-access";
+import { renderProject, renderSignal } from "@/lib/security/render-budget";
+import { createHash } from "node:crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import { config } from "@/lib/config";
-import { safeFetch } from "@/lib/ssrf";
+import { fetchPublic } from "@/lib/ssrf";
 import { storageFilePath } from "@/lib/storage";
 import { runFfmpeg } from "./ffmpeg";
 import type { VideoLayer } from "./timeline";
@@ -19,7 +22,7 @@ export interface DecodedLayer {
 }
 
 export function sanitizeLayerId(id: string): string {
-  return id.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 100) || "layer";
+  return "layer-" + createHash("sha256").update(id).digest("hex").slice(0, 32);
 }
 
 export function storageKeyFromUrl(url: string): string | null {
@@ -28,30 +31,20 @@ export function storageKeyFromUrl(url: string): string | null {
 }
 
 async function downloadRemoteVideo(url: string, outPath: string): Promise<void> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await safeFetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; CanoliteRenderer/1.0)",
-        Accept: "video/*,*/*;q=0.8",
-      },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const len = Number(res.headers.get("content-length") || 0);
-    if (len > MAX_REMOTE_VIDEO_BYTES) throw new Error("remote video is too large");
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength > MAX_REMOTE_VIDEO_BYTES) throw new Error("remote video is too large");
-    await fs.writeFile(outPath, buf);
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await fetchPublic(url, {signal: renderSignal(), maxBytes: MAX_REMOTE_VIDEO_BYTES, timeoutMs: FETCH_TIMEOUT_MS,
+    headers: { "User-Agent": "CanoliteRenderer/1.0", Accept: "video/*,*/*;q=0.8" } });
+  if (!res.ok) throw new Error(`Remote video returned HTTP ${res.status}`);
+  await fs.writeFile(outPath, res.bytes, {signal: renderSignal()});
 }
 
 export async function resolveVideoSource(videoSrc: string, tmpDir: string, layerId: string): Promise<string> {
   const key = storageKeyFromUrl(videoSrc);
-  if (key) return storageFilePath(key);
+  if (key) {
+    if (privateMedia() && !(await projectOwnsMedia(renderProject() || "",key))) throw new Error("Video source not available to this project");
+    const file = await fs.realpath(storageFilePath(key));
+    if (!file.startsWith((await fs.realpath(storageFilePath(""))) + path.sep)) throw new Error("Invalid video path");
+    return file;
+  }
   if (/^https?:\/\//i.test(videoSrc)) {
     const out = path.join(tmpDir, `${sanitizeLayerId(layerId)}-source`);
     await downloadRemoteVideo(videoSrc, out);

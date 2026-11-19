@@ -1,3 +1,4 @@
+import { renderBody, RenderAdmissionError } from "@/lib/render/admission";
 import { NextResponse } from "next/server";
 import { authenticateApiKey } from "@/lib/api-auth";
 import { withCors, handleOptions } from "@/lib/cors";
@@ -15,7 +16,7 @@ export async function POST(request: Request) {
     const auth = await authenticateApiKey(request);
     if (auth instanceof NextResponse) return withCors(auth);
 
-    const parsed = batchRequestSchema.safeParse(await request.json());
+    const parsed = batchRequestSchema.safeParse(await renderBody(request));
     if (!parsed.success) {
       return withCors(
         NextResponse.json(
@@ -84,6 +85,7 @@ export async function POST(request: Request) {
       )
     );
   } catch (error) {
+    if (error instanceof RenderAdmissionError) return withCors(NextResponse.json({error:error.message}, {status:error.status,headers:error.status === 429 ? {"Retry-After":"10"} : undefined}));
     console.error("Batch render error:", error);
     return withCors(
       NextResponse.json({ error: "Internal server error" }, { status: 500 })

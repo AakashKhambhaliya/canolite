@@ -1,3 +1,4 @@
+import { createRenderPage, type Frames } from "@/lib/security/render-page";
 /**
  * Pool of identical headless-Chromium render pages.
  *
@@ -19,6 +20,7 @@ export interface FrameRenderPool {
 
 export async function createFrameRenderPool(params: {
   size: number;
+  frames?: Frames;
   /** Make a fresh page render-ready (load the design, fonts, globals). */
   setupPage: (page: Page) => Promise<void>;
   /** Render one frame on one page. Called with ≤1 in-flight call per page. */
@@ -29,7 +31,7 @@ export async function createFrameRenderPool(params: {
   const pages: Page[] = [];
   try {
     for (let i = 0; i < params.size; i += 1) {
-      const page = await browser.newPage({ viewport: { width: 16, height: 16 }, deviceScaleFactor: 1 });
+      const page = await createRenderPage(browser, params.frames);
       page.setDefaultTimeout(params.timeoutMs);
       pages.push(page);
     }
@@ -42,11 +44,11 @@ export async function createFrameRenderPool(params: {
         return params.renderOnPage(page, frameIdx);
       },
       async close() {
-        await Promise.all(pages.map((page) => page.close().catch(() => undefined)));
+        await Promise.all(pages.map((page) => page.context().close().catch(() => undefined)));
       },
     };
   } catch (error) {
-    await Promise.all(pages.map((page) => page.close().catch(() => undefined)));
+    await Promise.all(pages.map((page) => page.context().close().catch(() => undefined)));
     throw error;
   }
 }

@@ -6,7 +6,7 @@
  */
 import { db } from "@/db";
 import { renderJobs, projects } from "@/db/schema";
-import { lt, and, isNotNull, eq, inArray, sql } from "drizzle-orm";
+import { lt, and, isNotNull, eq, or, sql, type SQL } from "drizzle-orm";
 import { deleteFile } from "@/lib/storage";
 
 const DEFAULT_RETENTION_HOURS = 24;
@@ -79,13 +79,8 @@ export async function failOrphanedRenders(): Promise<number> {
  */
 function cleanableWhere(retentionHours: number, projectId?: string) {
   const cutoff = sql`now() - make_interval(hours => ${retentionHours})`;
-  return projectId
-    ? and(
-        lt(renderJobs.createdAt, cutoff),
-        isNotNull(renderJobs.completedAt),
-        eq(renderJobs.projectId, projectId)
-      )
-    : and(lt(renderJobs.createdAt, cutoff), isNotNull(renderJobs.completedAt));
+  const eligible = or(eq(renderJobs.status, "deleting"), and(lt(renderJobs.createdAt, cutoff), isNotNull(renderJobs.completedAt)));
+  return projectId ? and(eligible, eq(renderJobs.projectId, projectId)) : eligible;
 }
 
 /**
@@ -103,37 +98,45 @@ export async function countCleanableRenders(
   return rows.length;
 }
 
-interface StoredJobFiles {
-  imageUrl: string | null;
-  outputUrl: string | null;
-  posterUrl: string | null;
-}
-
-/**
- * Remove the files behind a set of jobs. Returns the number of failures.
- *
- * De-duplicated per job: image jobs store the same URL in imageUrl and
- * outputUrl, and deleting the same key twice would count a phantom error.
- * Video jobs additionally write a poster alongside the MP4 — sweeping only
- * imageUrl left one orphaned JPEG per video render on disk forever.
- */
-async function deleteStoredFiles(jobs: StoredJobFiles[]): Promise<number> {
-  let errors = 0;
-  for (const job of jobs) {
-    const urls = new Set(
-      [job.imageUrl, job.outputUrl, job.posterUrl].filter(Boolean) as string[]
-    );
-    for (const url of urls) {
-      try {
-        // A stored URL looks like ${APP_URL}/storage/renders/img_xxx.png
-        const match = url.match(/\/storage\/(.+)$/);
-        if (match) await deleteFile(match[1]);
-      } catch {
-        errors++;
-      }
-    }
+// Delete the tracked files plus deterministic partial outputs from interrupted
+// publication. A failure leaves a durable tombstone for the next sweep.
+export async function deleteRenderFiles(job: {uid:string; imageUrl:string|null; outputUrl:string|null; posterUrl:string|null}, unlink = deleteFile) {
+  if (!/^[a-zA-Z0-9_-]{1,32}$/.test(job.uid)) throw new Error("Invalid render identifier");
+  const keys = new Set(["png","jpg","webp","mp4","poster.jpg"].map(ext => `renders/${job.uid}.${ext}`));
+  for (const url of [job.imageUrl,job.outputUrl,job.posterUrl]) {
+    if (!url) continue;
+    const pathname = new URL(url,"https://storage.invalid").pathname;
+    if (!pathname.startsWith("/storage/renders/")) throw new Error("Unexpected stored render URL");
+    const key = decodeURIComponent(pathname.slice("/storage/".length));
+    if (!/^renders\/[a-zA-Z0-9._-]+$/.test(key)) throw new Error("Invalid render file name");
+    keys.add(key);
   }
-  return errors;
+  for (const key of keys) await unlink(key);
+}
+export async function deleteRenderRow(id:string, where?:SQL) {
+  return db.transaction(async tx => {
+    // Same row and lock as runJob's publication; re-check scope/age under lock.
+    const [job] = await tx.select({uid:renderJobs.uid,imageUrl:renderJobs.imageUrl,outputUrl:renderJobs.outputUrl,posterUrl:renderJobs.posterUrl})
+      .from(renderJobs).where(and(eq(renderJobs.id,id),where)).for("update");
+    if (!job) return "missing";
+    try { await deleteRenderFiles(job); } catch {
+      await tx.update(renderJobs).set({status:"deleting", errorMessage:"File deletion pending; will retry."}).where(eq(renderJobs.id,id));
+      return "pending";
+    }
+    await tx.delete(renderJobs).where(eq(renderJobs.id,id));
+    return "deleted";
+  });
+}
+async function removeMatching(where?:SQL) {
+  const rows = await db.select({id:renderJobs.id}).from(renderJobs).where(where);
+  let deleted = 0, errors = 0;
+  for (const {id} of rows) {
+    const outcome = await deleteRenderRow(id, where);
+    if (outcome === "deleted") deleted++;
+    if (outcome === "pending") errors++;
+  }
+  if (errors) console.error(`[cleanup] ${errors} render deletions pending retry`);
+  return {deleted, errors};
 }
 
 /** How many renders the project has in total, regardless of age or status. */
@@ -153,94 +156,11 @@ export async function cleanupOldRenders(
   retentionHours: number = DEFAULT_RETENTION_HOURS,
   projectId?: string
 ): Promise<{ deleted: number; errors: number }> {
-  const where = cleanableWhere(retentionHours, projectId);
-
-  // Find the matching jobs (so we can remove their files first). Video jobs
-  // write a poster alongside the MP4 and record it in its own column, so
-  // sweeping only imageUrl left one orphaned JPEG per video render on disk
-  // forever — exactly what retention exists to prevent. The manual per-render
-  // delete already removes all three; match it here.
-  const oldJobs = await db
-    .select({
-      id: renderJobs.id,
-      imageUrl: renderJobs.imageUrl,
-      outputUrl: renderJobs.outputUrl,
-      posterUrl: renderJobs.posterUrl,
-    })
-    .from(renderJobs)
-    .where(where);
-
-  if (oldJobs.length === 0) {
-    return { deleted: 0, errors: 0 };
-  }
-
-  const errors = await deleteStoredFiles(oldJobs);
-
-  // Delete by the exact IDs just processed, not by re-running the
-  // time-based `where` — a job that matched createdAt < cutoff but was
-  // still incomplete (excluded above by isNotNull(completedAt)) can finish
-  // during the file-deletion loop above and start matching `where` by now,
-  // which would delete its DB row here without ever having deleted its
-  // file above, orphaning it on disk permanently.
-  await db.delete(renderJobs).where(
-    inArray(
-      renderJobs.id,
-      oldJobs.map((j) => j.id)
-    )
-  );
-
-  const deleted = oldJobs.length;
-  console.log(
-    `[cleanup] Deleted ${deleted} renders older than ${retentionHours}h` +
-      (projectId ? ` (project ${projectId})` : "") +
-      ` (${errors} file errors)`
-  );
-
-  return { deleted, errors };
+  return removeMatching(cleanableWhere(retentionHours, projectId));
 }
 
-/**
- * Delete EVERY render in a project right now, whatever its age or status.
- *
- * The retention sweep is deliberately conservative — it only touches finished
- * jobs past the cutoff — which meant the "Clean Now" button did nothing at all
- * on a project whose renders were all newer than the retention period, and
- * looked broken. Manual deletion is a separate, explicit intent, so it gets its
- * own path rather than being faked by temporarily lowering the retention.
- *
- * Jobs still queued or processing are included: the caller asked for
- * everything, and a render whose row disappears mid-flight simply finds nothing
- * to update when it finishes (the row is gone, the UPDATE is a no-op).
- */
-export async function purgeAllRenders(
-  projectId: string
-): Promise<{ deleted: number; errors: number }> {
-  const jobs = await db
-    .select({
-      id: renderJobs.id,
-      imageUrl: renderJobs.imageUrl,
-      outputUrl: renderJobs.outputUrl,
-      posterUrl: renderJobs.posterUrl,
-    })
-    .from(renderJobs)
-    .where(eq(renderJobs.projectId, projectId));
-
-  if (jobs.length === 0) return { deleted: 0, errors: 0 };
-
-  const errors = await deleteStoredFiles(jobs);
-
-  await db.delete(renderJobs).where(
-    inArray(
-      renderJobs.id,
-      jobs.map((j) => j.id)
-    )
-  );
-
-  console.log(
-    `[cleanup] Purged all ${jobs.length} renders for project ${projectId} ` +
-      `(${errors} file errors)`
-  );
-  return { deleted: jobs.length, errors };
+export function purgeAllRenders(projectId: string) {
+  return removeMatching(eq(renderJobs.projectId, projectId));
 }
 
 /**

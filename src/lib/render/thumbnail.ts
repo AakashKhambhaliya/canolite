@@ -1,3 +1,4 @@
+import { withMediaProject, withRenderSlot } from "@/lib/security/render-budget";
 /**
  * Template thumbnail generation.
  *
@@ -99,7 +100,7 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
   const existing = inflight.get(templateRowId);
   if (existing) return existing;
 
-  const p = (async () => {
+  const p = withRenderSlot(async () => {
     for (let attempt = 1; attempt <= MAX_RENDER_ATTEMPTS; attempt++) {
       const [template] = await db
         .select({
@@ -124,12 +125,13 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
       const snapshot = template.updatedAt;
       const snapshotRaw = template.updatedAtRaw;
 
+      const { buffer } = await withMediaProject(template.projectId,async () => {
       const { designJson, customFonts } = await prepareDesignForRender(
         template.designJson,
         template.projectId
       );
 
-      const { buffer } = await renderToBuffer({
+      return renderToBuffer({
         designJson,
         width: template.width,
         height: template.height,
@@ -137,6 +139,7 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
         quality: 80,
         scale: thumbnailScale(template.width, template.height),
         customFonts,
+      });
       });
 
       const key = thumbnailKey(template.id, snapshot);
@@ -172,7 +175,7 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
     console.error(
       `[thumbnail] Gave up on template ${templateRowId} after ${MAX_RENDER_ATTEMPTS} attempts: design kept changing mid-render.`
     );
-  })()
+  })
     .catch((err: any) => {
       // Degrade to the grid's placeholder rather than failing anything.
       console.error(

@@ -20,6 +20,8 @@ services:
       - APP_URL=${APP_URL:-http://localhost:3000}
       # - ADMIN_EMAIL=you@example.com
       # - ADMIN_PASSWORD=change-me-please
+      # Setup wizard token; when empty a one-time token is printed in the logs.
+      - CANOLITE_SETUP_TOKEN=${CANOLITE_SETUP_TOKEN:-}
     volumes:
       - canolite_data:/app/data # rendered images + uploads + backups
     depends_on:

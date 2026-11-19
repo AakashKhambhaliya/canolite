@@ -46,6 +46,10 @@ services:
       # - ADMIN_EMAIL=you@example.com
       # - ADMIN_PASSWORD=change-me-please
       #
+      # Token the setup wizard asks for. Leave unset and a one-time token is
+      # printed in the container logs at startup.
+      - CANOLITE_SETUP_TOKEN=${CANOLITE_SETUP_TOKEN:-}
+      #
       # For production, set DATABASE_URL to a Coolify PostgreSQL resource's
       # internal connection string. If DATABASE_URL is omitted, the image starts
       # embedded PostgreSQL under /app/data/pgdata. Never set DATABASE_URL to a

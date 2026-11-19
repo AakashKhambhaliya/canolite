@@ -112,6 +112,7 @@ export const templateCreateSchema = z.object({
 });
 
 export const templateUpdateSchema = z.object({
+  expectedVersion: z.number().int().min(0).max(2147483647).optional(),
   name: z.string().trim().min(1).max(200).optional(),
   width: canvasDimension.optional(),
   height: canvasDimension.optional(),
@@ -126,7 +127,7 @@ export const settingsSchema = z.object({
   // rejects garbage (non-numeric strings, NaN) instead of silently letting
   // it through the way a bare `Number(x)` in the route handler used to.
   webhookUrl: z.union([z.string().url(), z.literal("")]).optional(),
-  webhookSecret: z.string().optional(),
+  webhookSecret: z.string().max(4096).optional(),
   defaultFormat: z.enum(["png", "jpg", "jpeg", "webp", "mp4"]).optional(),
   defaultQuality: z.coerce.number().min(MIN_QUALITY).max(MAX_QUALITY).optional(),
   defaultScale: z.coerce.number().min(MIN_SCALE).max(MAX_SCALE).optional(),

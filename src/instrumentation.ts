@@ -14,6 +14,9 @@ export async function register() {
       return;
     }
 
+    const { checkPrivateStorage } = await import("@/lib/security/media-access");
+    await checkPrivateStorage();
+
     const { ensureDb, db } = await import("@/db");
     await ensureDb();
 
@@ -52,6 +55,17 @@ export async function register() {
         "[render] Could not verify the Chromium install:",
         e instanceof Error ? e.message : e
       );
+    }
+
+    // While no admin exists, tell the operator how to unlock the setup wizard.
+    try {
+      const { isSetupComplete } = await import("@/lib/admin");
+      if (!(await isSetupComplete())) {
+        const { announceSetupToken } = await import("@/lib/security/bootstrap");
+        announceSetupToken();
+      }
+    } catch (e) {
+      console.error("[setup] Could not check setup state:", e);
     }
 
     // Instance-marker consistency check (lost/mismatched volume detection).

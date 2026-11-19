@@ -1,0 +1,44 @@
+name: Editor release checks
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  editor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npx --no-install playwright install --with-deps chromium
+      - run: npm run typecheck && npm run lint && npm test
+      - run: npm run build
+      - name: Exercise the normally authenticated production build
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PORT=3101 APP_URL=http://127.0.0.1:3101
+          export PGDATA_DIR="$RUNNER_TEMP/canolite-qa/data/pgdata" PGPORT=54419
+          export STORAGE_DIR="$RUNNER_TEMP/canolite-qa/storage" BACKUP_DIR="$RUNNER_TEMP/canolite-qa/backups"
+          export ADMIN_EMAIL=ci@canolite.local ADMIN_PASSWORD="$(openssl rand -hex 32)" SEED_DEMO_DATA=true
+          echo "::add-mask::$ADMIN_PASSWORD"
+          export CANOLITE_TEST_EMAIL="$ADMIN_EMAIL" CANOLITE_TEST_PASSWORD="$ADMIN_PASSWORD" STUDIO_TEST_URL="$APP_URL"
+          export RENDER_CONCURRENCY=1 VIDEO_FRAME_WORKERS=1 VIDEO_CONCURRENCY=1
+          # Exercise the real Chromium frame path; the fast-path and frame-order
+          # unit suites run above. No production DB, deployment keys, or secrets.
+          export VIDEO_FORCE_LEGACY_RENDERER=1
+          node node_modules/next/dist/bin/next start -H 127.0.0.1 -p "$PORT" > "$RUNNER_TEMP/canolite-qa.log" 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true' EXIT
+          curl --fail --silent --show-error --retry 12 --retry-delay 1 --retry-all-errors --max-time 12 "$APP_URL/api/health" > /dev/null
+          npm run test:studio
+          npm run test:studio:media

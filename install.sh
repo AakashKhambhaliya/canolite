@@ -11,6 +11,7 @@
 #   CANOLITE_DIR=/opt/canolite         # install location (default ~/canolite)
 #   ADMIN_EMAIL=you@example.com        # auto-create admin (skip setup wizard)
 #   ADMIN_PASSWORD=change-me
+#   CANOLITE_SETUP_TOKEN=...           # setup wizard token (generated if unset)
 #
 # Video support requires ffmpeg/ffprobe. The Docker image installs them for you
 # (roughly +80 MB). Non-Docker/manual installs should install ffmpeg and set
@@ -92,13 +93,26 @@ if [ -z "${APP_URL:-}" ]; then
   fi
 fi
 
+# --- setup token ---
+# The first-run setup wizard asks for this so nobody else can claim a freshly
+# started, publicly reachable instance. Keep the one from a previous run.
+SETUP_TOKEN="${CANOLITE_SETUP_TOKEN:-}"
+if [ -z "$SETUP_TOKEN" ] && [ -f .env ]; then
+  SETUP_TOKEN="$(sed -n 's/^CANOLITE_SETUP_TOKEN=//p' .env | tail -n 1)"
+fi
+if [ -z "$SETUP_TOKEN" ]; then
+  SETUP_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+fi
+
 # --- env for compose ---
 {
   echo "APP_URL=${APP_URL}"
   echo "PORT=${PORT}"
   [ -n "${ADMIN_EMAIL:-}" ]    && echo "ADMIN_EMAIL=${ADMIN_EMAIL}"
   [ -n "${ADMIN_PASSWORD:-}" ] && echo "ADMIN_PASSWORD=${ADMIN_PASSWORD}"
+  echo "CANOLITE_SETUP_TOKEN=${SETUP_TOKEN}"
 } > .env
+chmod 600 .env
 green "→ Wrote .env (APP_URL=${APP_URL})"
 
 # --- run ---
@@ -118,6 +132,8 @@ green "  ✅ Canolite is starting!"
 echo ""
 echo "     URL:    ${APP_URL}"
 echo "     Setup:  open the URL and create your admin account (one-time wizard)"
+echo "     Token:  ${SETUP_TOKEN}"
+echo "             (the setup wizard asks for it; it is also saved in ${INSTALL_DIR}/.env)"
 echo ""
 echo "     Logs:   cd ${INSTALL_DIR} && ${COMPOSE} logs -f"
 echo "     Stop:   cd ${INSTALL_DIR} && ${COMPOSE} down"

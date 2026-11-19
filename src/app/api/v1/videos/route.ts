@@ -1,3 +1,4 @@
+import { renderBody, RenderAdmissionError } from "@/lib/render/admission";
 import { NextResponse } from "next/server";
 import { authenticateApiKey } from "@/lib/api-auth";
 import { withCors, handleOptions } from "@/lib/cors";
@@ -15,7 +16,7 @@ export async function POST(request: Request) {
     const auth = await authenticateApiKey(request);
     if (auth instanceof NextResponse) return withCors(auth);
 
-    const parsed = videoRenderRequestSchema.safeParse(await request.json());
+    const parsed = videoRenderRequestSchema.safeParse(await renderBody(request));
     if (!parsed.success) {
       return withCors(NextResponse.json({ error: "Validation error", details: parsed.error.issues.map((i) => ({ field: i.path.join("."), message: i.message })) }, { status: 400 }));
     }
@@ -37,6 +38,7 @@ export async function POST(request: Request) {
 
     return withCors(NextResponse.json({ uid: created.job.uid, status: "queued", template_id, format: "mp4", fps: created.job.fps, duration: created.job.durationSec, progress: 0, warnings: created.warnings.length ? created.warnings : undefined, created_at: created.job.createdAt }, { status: 202 }));
   } catch (error: any) {
+    if (error instanceof RenderAdmissionError) return withCors(NextResponse.json({error:error.message}, {status:error.status,headers:error.status === 429 ? {"Retry-After":"10"} : undefined}));
     console.error("Video render API error:", error);
     return withCors(NextResponse.json({ error: error?.message || "Internal server error" }, { status: /does not contain video/i.test(error?.message || "") ? 400 : 500 }));
   }

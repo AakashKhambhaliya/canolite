@@ -89,7 +89,7 @@ export async function POST(request: Request) {
 
     if (scope === "all") {
       const result = await purgeAllRenders(user.projectId);
-      return NextResponse.json({ success: true, scope, ...result });
+      return NextResponse.json({ success: !result.errors, error: result.errors ? "Some files could not be deleted; cleanup will retry." : undefined, scope, ...result });
     }
 
     const retentionHours = requested ?? (await retentionFor(user.projectId));
@@ -97,7 +97,8 @@ export async function POST(request: Request) {
     const remaining = await countRenders(user.projectId);
 
     return NextResponse.json({
-      success: true,
+      success: !result.errors,
+      error: result.errors ? "Some files could not be deleted; cleanup will retry." : undefined,
       scope,
       ...result,
       remaining,

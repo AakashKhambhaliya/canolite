@@ -15,3 +15,10 @@ data/pg-credentials.json
 .pglite
 .pglite.*
 public/storage
+
+# Keep local QA, backups, media, account state and environment overrides out of the build context.
+.cache
+data
+.env.*
+!.env.example
+*.tsbuildinfo

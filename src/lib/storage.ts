@@ -91,8 +91,8 @@ export async function uploadFile(
 export async function deleteFile(key: string): Promise<void> {
   try {
     await fs.unlink(pathForKey(key));
-  } catch {
-    // Ignore missing files.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 

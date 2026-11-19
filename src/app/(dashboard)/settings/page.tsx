@@ -156,7 +156,7 @@ export default function SettingsPage() {
   useEffect(() => {
     if (settings) {
       setWebhookUrl(settings.webhookUrl || "");
-      setWebhookSecret(settings.webhookSecret || "");
+      setWebhookSecret("");
       setOutput({
         format:
           normalizeFormat(settings.defaultFormat) ??
@@ -180,7 +180,7 @@ export default function SettingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           webhookUrl,
-          webhookSecret,
+          ...(webhookSecret ? { webhookSecret } : {}),
           defaultFormat: output.format || FALLBACK_OUTPUT_SETTINGS.format,
           defaultQuality:
             output.quality === "" || output.quality === undefined
@@ -203,6 +203,7 @@ export default function SettingsPage() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to save");
       }
+      setWebhookSecret("");
       // Every other screen resolves against these values, so refresh them.
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["cleanup-status"] });
@@ -360,7 +361,8 @@ export default function SettingsPage() {
               <Input
                 value={webhookSecret}
                 onChange={(e) => setWebhookSecret(e.target.value)}
-                placeholder="Optional signing secret"
+                autoComplete="new-password"
+                placeholder={settings?.hasWebhookSecret ? "Secret saved — leave blank to keep it" : "Optional signing secret"}
                 type="password"
               />
               <p className="text-xs text-muted-foreground">
@@ -372,7 +374,8 @@ export default function SettingsPage() {
               variant="outline"
               size="sm"
               onClick={handleTestWebhook}
-              disabled={testing}
+              disabled={testing || !settings?.webhookUrl || webhookUrl !== settings.webhookUrl || !!webhookSecret}
+              title="Test the saved webhook URL and signing settings"
             >
               {testing ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />

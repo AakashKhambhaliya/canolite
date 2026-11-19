@@ -1,4 +1,21 @@
+import { renderSignal } from "@/lib/security/render-budget";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+
+// All inputs have already been resolved to a local container, a rendered PNG,
+// or our own frame pipe. Do not let nested demuxers open network resources.
+function boundedArgs(args: string[]) {
+  return args.flatMap(a => a === "-i" ? ["-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm,image2pipe,png_pipe,image2,mjpeg", a] : [a]);
+}
+function trackChild<T extends import("child_process").ChildProcess>(child: T) {
+  const signal = renderSignal();
+  if (signal) {
+    const stop = () => { if (child.exitCode === null) child.kill("SIGKILL"); };
+    signal.addEventListener("abort", stop, {once:true});
+    child.once("close", () => signal.removeEventListener("abort", stop));
+    if (signal.aborted) stop();
+  }
+  return child;
+}
 
 export function getFfmpegPath(): string {
   if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
@@ -36,15 +53,16 @@ export interface RunFfmpegOptions {
 }
 
 export function runFfmpeg(args: string[], options: RunFfmpegOptions = {}): Promise<void> {
-  return runProcess(getFfmpegPath(), args, options);
+  return runProcess(getFfmpegPath(), boundedArgs(args), options);
 }
 
 export function runFfprobe(args: string[], options: RunFfmpegOptions = {}): Promise<string> {
-  return runProcessCaptureStdout(getFfprobePath(), args, options);
+  return runProcessCaptureStdout(getFfprobePath(), ["-protocol_whitelist", "file", "-format_whitelist", "mov,matroska,webm", ...args], options);
 }
 
 export function spawnFfmpegPipe(args: string[]): ChildProcessWithoutNullStreams {
-  return spawn(getFfmpegPath(), args, { stdio: ["pipe", "pipe", "pipe"] });
+  renderSignal()?.throwIfAborted();
+  return trackChild(spawn(getFfmpegPath(), boundedArgs(args), { stdio: ["pipe", "pipe", "pipe"] }));
 }
 
 export interface RunFfmpegProgressOptions extends RunFfmpegOptions {
@@ -63,7 +81,8 @@ export interface RunFfmpegProgressOptions extends RunFfmpegOptions {
 export function runFfmpegWithProgress(args: string[], options: RunFfmpegProgressOptions = {}): Promise<void> {
   const binary = getFfmpegPath();
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    renderSignal()?.throwIfAborted();
+    const child = trackChild(spawn(binary, boundedArgs(args), { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] }));
 
     let stderr = "";
     let stdoutBuf = "";
@@ -103,7 +122,7 @@ export function runFfmpegWithProgress(args: string[], options: RunFfmpegProgress
       emitProgress();
     });
     child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+      stderr = (stderr + chunk).slice(-8192);
       options.onStderr?.(chunk);
     });
 
@@ -132,7 +151,8 @@ function timeoutMessage(binary: string, timeoutMs: number): string {
 
 function runProcess(binary: string, args: string[], options: RunFfmpegOptions): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] });
+    renderSignal()?.throwIfAborted();
+    const child = trackChild(spawn(binary, args, { cwd: options.cwd, stdio: ["ignore", "ignore", "pipe"] }));
     let stderr = "";
     let timedOut = false;
     const timer = options.timeoutMs
@@ -144,7 +164,7 @@ function runProcess(binary: string, args: string[], options: RunFfmpegOptions): 
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+      stderr = (stderr + chunk).slice(-8192);
       options.onStderr?.(chunk);
     });
 
@@ -172,7 +192,8 @@ function runProcessCaptureStdout(
   options: RunFfmpegOptions
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    renderSignal()?.throwIfAborted();
+    const child = trackChild(spawn(binary, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] }));
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -187,9 +208,10 @@ function runProcessCaptureStdout(
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
+      if (stdout.length > 1024 * 1024) { stdout = stdout.slice(0, 1024 * 1024); child.kill("SIGKILL"); }
     });
     child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+      stderr = (stderr + chunk).slice(-8192);
       options.onStderr?.(chunk);
     });
 

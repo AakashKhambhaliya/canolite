@@ -1,3 +1,4 @@
+import { bootstrapAuthorized } from "@/lib/security/bootstrap";
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { users } from "@/db/schema";
@@ -34,7 +35,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const { email, password } = await request.json();
+    const { email, password, setupToken } = await request.json();
+    if (!bootstrapAuthorized(setupToken)) {
+      return NextResponse.json({ error: "Invalid setup token. Use CANOLITE_SETUP_TOKEN, or the one-time token printed in the server log at startup." }, { status: 403 });
+    }
 
     const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
     if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {

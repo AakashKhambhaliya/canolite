@@ -1,3 +1,4 @@
+import { databaseTransport } from "../../scripts/db-transport.cjs";
 /**
  * Automatic database backups.
  *
@@ -96,7 +97,7 @@ async function pgDumpIfAvailable(
   await new Promise<void>((resolve, reject) => {
     const child = spawn(
       "pg_dump",
-      ["--dbname", databaseUrl, "--format=custom", "--file", outFile],
+      ["--dbname", databaseTransport(databaseUrl).libpqUrl, "--format=custom", "--file", outFile],
       { stdio: ["ignore", "pipe", "pipe"] }
     );
     let err = "";

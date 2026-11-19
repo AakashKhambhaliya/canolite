@@ -1,25 +1,8 @@
 "use client";
 
-import type React from "react";
-import { Download } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { cn } from "@/lib/utils";
+import { useState } from "react";
+import { Download, Loader2 } from "lucide-react";
+import { StudioDialog } from "./studio/chrome";
 import {
   FPS_PRESETS,
   IMAGE_FORMATS,
@@ -54,7 +37,9 @@ interface ExportDialogProps {
   estimateTitle?: string;
   /** "~1.2 MB", or null for formats the estimator can't speak to. */
   sizeLabel?: string | null;
-  onExport: () => void;
+  validationIssue: string | null;
+  saving: boolean;
+  onExport: () => Promise<void>;
 }
 
 export function ExportDialog({
@@ -78,175 +63,172 @@ export function ExportDialog({
   estimateLabel,
   estimateTitle,
   sizeLabel,
+  validationIssue,
+  saving,
   onExport,
 }: ExportDialogProps) {
+  const [busy, setBusy] = useState(false);
+  const issue =
+    validationIssue ||
+    (exportFormat === "mp4" &&
+    exportDuration !== "" &&
+    (!Number.isFinite(exportDuration) ||
+      exportDuration < MIN_DURATION_SEC ||
+      exportDuration > MAX_DURATION_SEC)
+      ? `Duration must be between ${MIN_DURATION_SEC} and ${MAX_DURATION_SEC} seconds.`
+      : null);
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="sm:max-w-[400px] border-white/10"
-        style={{
-          backgroundColor: "#14171c",
-          color: "#e6e8ec",
-          "--border": "220 15% 20%",
-          "--background": "220 18% 10%",
-          "--foreground": "220 10% 92%",
-          "--accent": "220 15% 16%",
-          "--accent-foreground": "220 10% 92%",
-          "--popover": "220 18% 10%",
-          "--popover-foreground": "220 10% 92%",
-          "--muted": "220 15% 16%",
-          "--muted-foreground": "220 10% 65%",
-          "--input": "220 15% 20%",
-        } as React.CSSProperties}
-      >
-        <DialogHeader>
-          <DialogTitle style={{ color: "#e6e8ec" }}>Export Image</DialogTitle>
-        </DialogHeader>
-
-        <div className="space-y-5 pt-2">
-          {/* Format */}
-          <div className="space-y-1.5">
-            <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-              Format
-            </Label>
-            <div className="grid grid-cols-4 gap-2">
-              {/* Format names match the rest of the app (JPG, not JPEG — see
-                  lib/output-settings.ts). SVG is export-only: it is drawn from
-                  the canvas here and the render API has no equivalent. */}
-              {([...IMAGE_FORMATS, "svg", ...(canvasHasVideo ? ["mp4" as const] : [])] as const).map((fmt) => (
+    <StudioDialog
+      open={open}
+      close={() => {
+        if (!busy) onOpenChange(false);
+      }}
+      title="Export design"
+      description="Choose a file format and size for your artboard."
+      kicker="STUDIO OUTPUT"
+    >
+      <div className="sl-form" aria-busy={busy}>
+        <label>File format</label>
+        <div className="sl-format-grid" role="group" aria-label="File format">
+          {[...IMAGE_FORMATS, "svg", ...(canvasHasVideo ? ["mp4"] : [])].map(
+            (f) => (
+              <button
+                key={f}
+                aria-pressed={exportFormat === f}
+                onClick={() => setExportFormat(f)}
+              >
+                {f.toUpperCase()}
+              </button>
+            ),
+          )}
+        </div>
+        {(exportFormat === "jpg" || exportFormat === "webp") && (
+          <label>
+            <span className="sl-label-end">
+              Image quality <small>{exportQuality}%</small>
+            </span>
+            <input
+              aria-label="Image quality"
+              type="range"
+              value={exportQuality}
+              min={10}
+              max={100}
+              step={5}
+              onChange={(e) => setExportQuality(Number(e.target.value))}
+            />
+          </label>
+        )}
+        {exportFormat === "mp4" && (
+          <>
+            <label>Frame rate</label>
+            <div className="sl-format-grid">
+              {FPS_PRESETS.map((f) => (
                 <button
-                  key={fmt}
-                  onClick={() => setExportFormat(fmt)}
-                  className={cn(
-                    "h-9 rounded-lg text-xs font-medium uppercase transition-colors",
-                    exportFormat === fmt
-                      ? "bg-[#2f6fde] text-white"
-                      : "bg-[#1f232a] hover:bg-[#23262c]"
-                  )}
-                  style={exportFormat !== fmt ? { color: "#c4c9d2" } : undefined}
+                  key={f}
+                  aria-pressed={exportFps === f}
+                  onClick={() => setExportFps(f)}
                 >
-                  {fmt}
+                  {f} fps
                 </button>
               ))}
             </div>
-          </div>
-
-          {/* Quality (only for the lossy image formats) */}
-          {(exportFormat === "jpg" || exportFormat === "webp") && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                  Quality
-                </Label>
-                <span className="text-xs font-mono" style={{ color: "#8b919c" }}>
-                  {exportQuality}%
-                </span>
-              </div>
-              <Slider
-                value={[exportQuality]}
-                onValueChange={([v]) => setExportQuality(v)}
-                min={10}
-                max={100}
-                step={5}
-              />
-            </div>
-          )}
-
-          {exportFormat === "mp4" && (
-            <div className="space-y-3 rounded-lg border border-white/[0.08] p-3">
-              <div className="grid grid-cols-3 gap-2">
-                {FPS_PRESETS.map((fps) => (
-                  <button
-                    key={fps}
-                    onClick={() => setExportFps(fps)}
-                    className={cn(
-                      "h-8 rounded-lg text-xs font-medium transition-colors",
-                      exportFps === fps ? "bg-[#2f6fde] text-white" : "bg-[#1f232a] hover:bg-[#23262c]"
-                    )}
-                  >
-                    {fps} fps
-                  </button>
-                ))}
-              </div>
-              <Input
-                type="number"
-                min={MIN_DURATION_SEC}
-                max={MAX_DURATION_SEC}
-                step={0.1}
-                placeholder="Auto duration"
-                value={exportDuration}
-                onChange={(e) => setExportDuration(e.target.value === "" ? "" : Number(e.target.value))}
-                className="h-8 bg-[#121418] border-white/[0.08] text-xs"
-              />
-              <Select value={exportVideoQuality} onValueChange={(v: any) => setExportVideoQuality(v)}>
-                <SelectTrigger className="h-8 bg-[#121418] border-white/[0.08] text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {VIDEO_QUALITY_PRESETS.map((preset) => (
-                    <SelectItem key={preset} value={preset}>
-                      {VIDEO_QUALITY_LABELS[preset]}
-                    </SelectItem>
+            <div className="sl-2cols">
+              <label>
+                Duration (seconds)
+                <input
+                  type="number"
+                  min={MIN_DURATION_SEC}
+                  max={MAX_DURATION_SEC}
+                  step={0.1}
+                  placeholder="Automatic"
+                  value={exportDuration}
+                  onChange={(e) =>
+                    setExportDuration(
+                      e.target.value === "" ? "" : Number(e.target.value),
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Video quality
+                <select
+                  value={exportVideoQuality}
+                  onChange={(e) =>
+                    setExportVideoQuality(
+                      e.target.value as typeof exportVideoQuality,
+                    )
+                  }
+                >
+                  {VIDEO_QUALITY_PRESETS.map((v) => (
+                    <option key={v} value={v}>
+                      {VIDEO_QUALITY_LABELS[v]}
+                    </option>
                   ))}
-                </SelectContent>
-              </Select>
+                </select>
+              </label>
             </div>
-          )}
-
-          {/* Scale (not for SVG) */}
-          {exportFormat !== "svg" && (
-            <div className="space-y-1.5">
-              <Label className="text-[11px]" style={{ color: "#c4c9d2" }}>
-                Scale
-              </Label>
-              <div className="grid grid-cols-4 gap-2">
-                {SCALE_OPTIONS.map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setExportScale(s)}
-                    className={cn(
-                      "h-9 rounded-lg text-xs font-medium transition-colors",
-                      exportScale === s
-                        ? "bg-[#2f6fde] text-white"
-                        : "bg-[#1f232a] hover:bg-[#23262c]"
-                    )}
-                    style={exportScale !== s ? { color: "#c4c9d2" } : undefined}
-                  >
-                    {s}x
-                  </button>
-                ))}
-              </div>
-              <p className="text-[10px]" style={{ color: "#8b919c" }}>
-                Output: {templateWidth * exportScale} × {templateHeight * exportScale}px
-              </p>
-            </div>
-          )}
-
-          {/* Estimates. MP4 is rendered on the server, so it gets a time
-              estimate from this project's measured render history; the other
-              formats are drawn from the canvas here and finish immediately. */}
-          {(sizeLabel || estimateLabel) && (
+          </>
+        )}
+        {exportFormat !== "svg" && (
+          <>
+            <label>Export scale</label>
             <div
-              className="flex items-center justify-between text-[10px]"
-              style={{ color: "#8b919c" }}
+              className="sl-format-grid"
+              role="group"
+              aria-label="Export scale"
             >
-              <span>{sizeLabel ? `Est. size: ${sizeLabel}` : ""}</span>
-              {estimateLabel && (
-                <span title={estimateTitle}>Est. time: {estimateLabel}</span>
-              )}
+              {SCALE_OPTIONS.map((s) => (
+                <button
+                  key={s}
+                  aria-pressed={exportScale === s}
+                  onClick={() => setExportScale(s)}
+                >
+                  {s}×
+                </button>
+              ))}
             </div>
-          )}
-
-          {/* Export button */}
-          <Button
-            onClick={onExport}
-            className="w-full bg-[#2f6fde] hover:bg-[#2561c7] text-white"
-          >
-            <Download className="mr-2 h-4 w-4" />
-            Export {exportFormat.toUpperCase()}
-          </Button>
+          </>
+        )}
+        <div className="sl-setting-summary">
+          <strong>{exportFormat.toUpperCase()}</strong>
+          <span>
+            {exportFormat === "svg"
+              ? "Scalable vector"
+              : `${templateWidth * exportScale} × ${templateHeight * exportScale} px`}
+          </span>
         </div>
-      </DialogContent>
-    </Dialog>
+        {(sizeLabel || estimateLabel) && (
+          <p className="sl-fine" title={estimateTitle}>
+            {sizeLabel
+              ? `Estimated file size: ${sizeLabel}`
+              : `Estimated render time: ${estimateLabel}`}
+          </p>
+        )}
+        {issue && (
+          <p className="sl-export-issue" role="alert">
+            {issue}
+          </p>
+        )}
+        <button
+          className="sl-primary sl-fill"
+          disabled={busy || saving || !!issue}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onExport();
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? (
+            <Loader2 className="animate-spin" size={16} />
+          ) : (
+            <Download size={16} />
+          )}
+          Export {exportFormat.toUpperCase()}
+        </button>
+      </div>
+    </StudioDialog>
   );
 }

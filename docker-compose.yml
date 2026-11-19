@@ -31,6 +31,11 @@ services:
       # Leave empty to use the setup wizard.
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Token the setup wizard asks for (32+ chars, e.g. `openssl rand -hex 32`).
+      # Leave empty and a one-time token is printed in `docker compose logs`.
+      - CANOLITE_SETUP_TOKEN=${CANOLITE_SETUP_TOKEN:-}
+      # "private" requires sign-in / API key to fetch /storage files.
+      - MEDIA_ACCESS=${MEDIA_ACCESS:-public}
     volumes:
       - canolite_data:/app/data # database + storage + backups (all state)
     restart: unless-stopped

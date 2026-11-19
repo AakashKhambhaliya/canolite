@@ -1,32 +1,16 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { templates, templateFields } from "@/db/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
-import { extractFields } from "@/lib/render/apply-modifications";
 import { generateThumbnail } from "@/lib/render/thumbnail";
 import { deleteFile } from "@/lib/storage";
-import { isImage } from "@/lib/design/predicates";
+import { designHasVideo, documentFields } from "@/lib/editor/design-fields";
 import { templateUpdateSchema } from "@/lib/validation";
-
-function designHasVideo(value: any): boolean {
-  const objects = Array.isArray(value?.objects) ? value.objects : [];
-  const visit = (obj: any): boolean => {
-    if (!obj || typeof obj !== "object") return false;
-    // Must be case-insensitive (isImage lowercases): a LIVE Fabric object
-    // reports type "image", but the SERIALIZED design stored here reports
-    // "Image". Comparing to "image" directly never matched, so has_video
-    // stayed false for every template — which is what hid MP4 from the export
-    // options and made video renders fail with "does not contain video layers".
-    if (isImage(obj) && obj.mediaType === "video") return true;
-    return Array.isArray(obj.objects) && obj.objects.some(visit);
-  };
-  return objects.some(visit);
-}
 
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -42,15 +26,15 @@ export async function GET(
         and(
           eq(templates.id, id),
           eq(templates.projectId, user.projectId),
-          eq(templates.isDeleted, false)
-        )
+          eq(templates.isDeleted, false),
+        ),
       )
       .limit(1);
 
     if (!template) {
       return NextResponse.json(
         { error: "Template not found" },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
@@ -65,14 +49,14 @@ export async function GET(
     console.error("Error fetching template:", error);
     return NextResponse.json(
       { error: "Internal server error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
 
 export async function PUT(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -83,7 +67,9 @@ export async function PUT(
 
     // Same reasoning as the create route: an unbounded width/height persisted
     // here becomes an out-of-memory failure in every later render.
-    const parsed = templateUpdateSchema.safeParse(await request.json());
+    const parsed = templateUpdateSchema.safeParse(
+      await request.json().catch(() => null),
+    );
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       return NextResponse.json(
@@ -92,21 +78,31 @@ export async function PUT(
             ? `${issue.path.join(".") || "body"}: ${issue.message}`
             : "Invalid template",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
-    const { name, width, height, designJson, outputDefaults, videoDefaults } =
-      parsed.data;
+    const {
+      name,
+      width,
+      height,
+      designJson,
+      outputDefaults,
+      videoDefaults,
+      expectedVersion,
+    } = parsed.data;
 
+    // Legacy clients can omit expectedVersion, but every write advances the
+    // same counter. Existing NULL version rows represent the original v1.
+    const currentVersion = sql<number>`coalesce(${templates.version}, 1)`;
     const updateData: Record<string, any> = { updatedAt: new Date() };
     if (name !== undefined) updateData.name = name;
     if (width !== undefined) updateData.width = width;
     if (height !== undefined) updateData.height = height;
     if (designJson !== undefined) {
       updateData.designJson = designJson;
-      updateData.hasVideo = designHasVideo(designJson);
     }
-    if (outputDefaults !== undefined) updateData.outputDefaults = outputDefaults;
+    if (outputDefaults !== undefined)
+      updateData.outputDefaults = outputDefaults;
     if (videoDefaults !== undefined) updateData.videoDefaults = videoDefaults;
 
     const designChanged =
@@ -117,68 +113,93 @@ export async function PUT(
     // owns cleanup of the superseded file once the new one is written.
     if (designChanged) updateData.thumbnailUrl = null;
 
-    const [template] = await db
-      .update(templates)
-      .set(updateData)
-      .where(
-        and(
-          eq(templates.id, id),
-          eq(templates.projectId, user.projectId),
-          eq(templates.isDeleted, false)
-        )
-      )
-      .returning();
-
-    if (!template) {
+    const scope = and(
+      eq(templates.id, id),
+      eq(templates.projectId, user.projectId),
+      eq(templates.isDeleted, false),
+    );
+    let fields: ReturnType<typeof documentFields> | null;
+    try {
+      fields = designJson === undefined ? null : documentFields(designJson);
+      if (fields !== null) updateData.hasVideo = designHasVideo(designJson);
+    } catch {
       return NextResponse.json(
-        { error: "Template not found" },
-        { status: 404 }
+        {
+          error:
+            "Invalid design or field name. Field names must be 255 characters or fewer.",
+        },
+        { status: 400 },
       );
     }
-
-    if (designChanged) {
-      // Fire-and-forget: a render takes seconds and must not delay the
-      // response. generateThumbnail deletes the superseded file itself once
-      // the new one is written.
-      void generateThumbnail(template.id);
-    }
-
-    // Regenerate template_fields from design_json
-    if (designJson) {
-      // Delete existing fields
-      await db
-        .delete(templateFields)
-        .where(eq(templateFields.templateId, template.id));
-
-      // Extract and insert new fields
-      const fields = extractFields(designJson);
-      if (fields.length > 0) {
-        await db.insert(templateFields).values(
-          fields.map((f, idx) => ({
-            templateId: template.id,
-            name: f.name,
-            type: f.type,
-            defaultValue: f.defaultValue,
-            properties: f.properties,
-            sortOrder: idx,
-          }))
-        );
+    // Commit the document and its derived API fields together. Two tabs
+    // racing the same version cannot both pass PostgreSQL's row predicate.
+    const template = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(templates)
+        .set({ ...updateData, version: sql`${currentVersion} + 1` })
+        .where(
+          and(
+            scope,
+            expectedVersion === undefined
+              ? undefined
+              : eq(currentVersion, expectedVersion),
+          ),
+        )
+        .returning();
+      if (!row) return null;
+      if (fields !== null) {
+        await tx
+          .delete(templateFields)
+          .where(eq(templateFields.templateId, row.id));
+        if (fields.length)
+          await tx
+            .insert(templateFields)
+            .values(
+              fields.map((f, sortOrder) => ({
+                ...f,
+                sortOrder,
+                templateId: row.id,
+              })),
+            );
       }
+      return row;
+    });
+    if (!template) {
+      if (expectedVersion !== undefined) {
+        const [existing] = await db
+          .select({ id: templates.id })
+          .from(templates)
+          .where(scope)
+          .limit(1);
+        if (existing)
+          return NextResponse.json(
+            {
+              error:
+                "A newer version was saved elsewhere. Your edits have not been overwritten.",
+            },
+            { status: 409 },
+          );
+      }
+      return NextResponse.json(
+        { error: "Template not found" },
+        { status: 404 },
+      );
     }
+    if (designChanged) void generateThumbnail(template.id);
 
     return NextResponse.json(template);
   } catch (error) {
     console.error("Error updating template:", error);
     return NextResponse.json(
       { error: "Internal server error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
 
 export async function DELETE(
   request: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
@@ -190,22 +211,14 @@ export async function DELETE(
     const [existing] = await db
       .select({ thumbnailUrl: templates.thumbnailUrl })
       .from(templates)
-      .where(
-        and(
-          eq(templates.id, id),
-          eq(templates.projectId, user.projectId)
-        )
-      )
+      .where(and(eq(templates.id, id), eq(templates.projectId, user.projectId)))
       .limit(1);
 
     await db
       .update(templates)
       .set({ isDeleted: true, updatedAt: new Date(), thumbnailUrl: null })
       .where(
-        and(
-          eq(templates.id, id),
-          eq(templates.projectId, user.projectId)
-        )
+        and(eq(templates.id, id), eq(templates.projectId, user.projectId)),
       );
 
     // A soft-deleted template's thumbnail file is orphaned. Remove it —
@@ -220,7 +233,7 @@ export async function DELETE(
     console.error("Error deleting template:", error);
     return NextResponse.json(
       { error: "Internal server error" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

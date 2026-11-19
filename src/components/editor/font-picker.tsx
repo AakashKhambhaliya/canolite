@@ -1,14 +1,17 @@
 "use client";
 
 import { useMemo, useState, useRef } from "react";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Check, ChevronsUpDown, Search, Upload, Loader2 } from "lucide-react";
 import {
   GOOGLE_FONTS,
   SYSTEM_FONTS,
   ensureFont,
-  registerCustomFont,
 } from "@/lib/editor/font-loader";
 
 export interface CustomFont {
@@ -77,7 +80,8 @@ export function FontPicker({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex h-8 w-full items-center justify-between rounded-md border border-white/[0.1] bg-[#1f232a] px-3 text-xs text-[#e6e8ec] hover:bg-[#23262c]"
+          aria-label="Choose typeface"
+          className="sl-font-trigger"
         >
           <span className="truncate" style={{ fontFamily: value }}>
             {value || "Select font"}
@@ -85,24 +89,21 @@ export function FontPicker({
           <ChevronsUpDown className="h-3.5 w-3.5 opacity-50 shrink-0" />
         </button>
       </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        className="w-64 p-0 bg-[#14171c] border-white/[0.1] text-[#e6e8ec]"
-      >
-        <div className="flex items-center gap-2 border-b border-white/[0.08] px-2.5 py-2">
-          <Search className="h-3.5 w-3.5 text-[#8b919c]" />
+      <PopoverContent align="start" className="sl-font-pop w-64 p-0">
+        <div className="flex items-center gap-2 border-b border-border px-2.5 py-2">
+          <Search className="h-3.5 w-3.5 text-muted-foreground" />
           <input
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search 1900+ fonts…"
-            className="w-full bg-transparent text-xs text-[#e6e8ec] placeholder:text-[#6b7280] outline-none"
+            className="w-full bg-transparent text-xs text-foreground placeholder:text-muted-foreground outline-none"
           />
         </div>
 
         <div className="max-h-64 overflow-y-auto py-1">
           {results.length === 0 && (
-            <div className="px-3 py-4 text-center text-xs text-[#8b919c]">
+            <div className="px-3 py-4 text-center text-xs text-muted-foreground">
               No fonts found
             </div>
           )}
@@ -112,29 +113,33 @@ export function FontPicker({
               type="button"
               onMouseEnter={() => ensureFont(f.family)}
               onClick={() => handleSelect(f.family)}
-              className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs hover:bg-[#23262c]"
+              className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
             >
               <span className="truncate" style={{ fontFamily: f.family }}>
                 {f.family}
               </span>
               <span className="flex items-center gap-1.5 shrink-0">
                 {f.group === "Custom" && (
-                  <span className="text-[9px] text-[#9fd0ff]">custom</span>
+                  <span className="text-[9px] text-blue-700 dark:text-blue-400">
+                    custom
+                  </span>
                 )}
                 {value === f.family && (
-                  <Check className="h-3.5 w-3.5 text-[#1d9e75]" />
+                  <Check className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                 )}
               </span>
             </button>
           ))}
         </div>
 
-        <div className="border-t border-white/[0.08] p-1.5">
-          <button
+        <div className="border-t border-border p-1.5">
+          <Button
             type="button"
+            variant="accent"
+            size="sm"
             disabled={uploading}
             onClick={() => fileRef.current?.click()}
-            className="flex w-full items-center justify-center gap-2 rounded-md bg-[#2f6fde] px-3 py-1.5 text-xs text-white hover:bg-[#2561c7] disabled:opacity-60"
+            className="w-full gap-2 text-xs"
           >
             {uploading ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -142,7 +147,7 @@ export function FontPicker({
               <Upload className="h-3.5 w-3.5" />
             )}
             Upload custom font
-          </button>
+          </Button>
           <input
             ref={fileRef}
             type="file"

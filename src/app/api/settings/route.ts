@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { projects } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { settingsSchema } from "@/lib/validation";
 import { isUrlSafe } from "@/lib/ssrf";
@@ -29,7 +29,8 @@ export async function GET() {
     const output = resolveOutputSettings(projectDefaultsLayer(project));
 
     return NextResponse.json({
-      ...project,
+      webhookUrl: project?.webhookUrl ?? null,
+      hasWebhookSecret: Boolean(project?.webhookSecret),
       defaultFormat: output.format,
       defaultQuality: output.quality,
       defaultScale: output.scale,
@@ -70,23 +71,16 @@ export async function PUT(request: Request) {
       retentionHours,
     } = parsed.data;
 
-    // Every other webhook URL entry point (webhook-test, the v1 render APIs)
-    // is checked against the SSRF guard before use — this one wasn't, even
-    // though nothing currently reads projects.webhookUrl back out for
-    // delivery. Guard it now so it can't become a live SSRF the moment it
-    // does get wired into a delivery path.
     if (webhookUrl && !(await isUrlSafe(webhookUrl))) {
-      return NextResponse.json(
-        { error: "webhookUrl must be a public http(s) URL" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Webhook URL must be public HTTP(S)." }, { status: 400 });
     }
-
-    const updateData: Record<string, any> = {
-      webhookUrl: webhookUrl || null,
-      webhookSecret: webhookSecret || null,
-      updatedAt: new Date(),
-    };
+    const updateData: Record<string, any> = { updatedAt: new Date() };
+    if (webhookUrl !== undefined) {
+      updateData.webhookUrl = webhookUrl || null;
+      // Changing a receiver never transfers its predecessor's signing key.
+      updateData.webhookSecret = sql`case when ${projects.webhookUrl} = ${webhookUrl} then ${projects.webhookSecret} else null end`;
+    }
+    if (webhookSecret !== undefined) updateData.webhookSecret = webhookSecret || null;
 
     // "jpeg" is stored as "jpg" so every reader sees one spelling.
     if (defaultFormat !== undefined)
@@ -98,11 +92,13 @@ export async function PUT(request: Request) {
       updateData.defaultVideoQuality = defaultVideoQuality;
     if (retentionHours !== undefined) updateData.retentionHours = retentionHours;
 
-    await db
-      .update(projects)
-      .set(updateData)
-      .where(eq(projects.id, user.projectId));
-
+    const valid = await db.transaction(async (tx) => {
+      const [current] = await tx.select({url: projects.webhookUrl}).from(projects).where(eq(projects.id, user.projectId)).for("update");
+      if (!current || (webhookSecret && !(webhookUrl ?? current.url)?.startsWith("https://"))) return false;
+      await tx.update(projects).set(updateData).where(eq(projects.id, user.projectId));
+      return true;
+    });
+    if (!valid) return NextResponse.json({error: "Save an HTTPS webhook URL to set a signing secret."}, {status: 400});
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

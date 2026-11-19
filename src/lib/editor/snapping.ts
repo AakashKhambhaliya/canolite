@@ -8,7 +8,6 @@
  * Guides are only visible while an object is actively snapping and disappear
  * as soon as the drag ends or the object is deselected.
  */
-const GUIDE_COLOR = "#ff2d78"; // smart-guide magenta, shown only while snapping
 const SNAP_THRESHOLD = 24; // screen pixels – strong snapping
 
 interface Guide {
@@ -185,7 +184,7 @@ export function installSnapping(canvas: any): () => void {
 
     ctx.save();
     ctx.lineWidth = 1;
-    ctx.strokeStyle = GUIDE_COLOR;
+    ctx.strokeStyle = canvas.selectionBorderColor;
     ctx.setLineDash([4, 3]);
     for (const g of guides) {
       ctx.beginPath();

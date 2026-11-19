@@ -1,3 +1,4 @@
+import { insertJobs, RenderAdmissionError } from "./admission";
 /**
  * Shared render-job creation.
  *
@@ -138,6 +139,7 @@ export async function findTemplate(projectId: string, templateId: string) {
 export async function sanitizeModifications(
   mods: Modification[]
 ): Promise<{ mods: Modification[]; warnings: string[] }> {
+  if (!Array.isArray(mods) || mods.length > 256) throw new RenderAdmissionError("Maximum 256 modifications per render", 400);
   const warnings: string[] = [];
   const out: Modification[] = [];
   for (const m of mods) {
@@ -191,9 +193,7 @@ export async function createRenderJob(params: {
     mods
   );
 
-  const [job] = await db
-    .insert(renderJobs)
-    .values({
+  const [job] = await insertJobs(params.projectId, [{
       uid: generateId("img"),
       batchUid: params.batchUid,
       templateId: template.id,
@@ -204,8 +204,7 @@ export async function createRenderJob(params: {
       quality: resolved.quality,
       scale: resolved.scale,
       webhookUrl: params.webhookUrl || null,
-    })
-    .returning();
+    }], true);
 
   return { job, warnings: [...ssrfWarnings, ...modWarnings], resolved };
 }
@@ -253,7 +252,7 @@ export async function createBatchJobs(params: {
     });
   }
 
-  await db.insert(renderJobs).values(rows);
+  await insertJobs(params.projectId, rows);
 
   return { batchUid, uids, resolved, templateUid: template.templateId };
 }
@@ -299,9 +298,7 @@ export async function createVideoRenderJob(params: {
     resolveVideoOutput(template, params.output, globalDefaults)
   );
 
-  const [job] = await db
-    .insert(renderJobs)
-    .values({
+  const [job] = await insertJobs(params.projectId, [{
       uid: generateId("vid"),
       batchUid: params.batchUid,
       templateId: template.id,
@@ -317,8 +314,7 @@ export async function createVideoRenderJob(params: {
       durationSec: video.durationSec,
       progress: 0,
       webhookUrl: params.webhookUrl || null,
-    })
-    .returning();
+    }], true);
 
   return {
     job,
@@ -365,7 +361,7 @@ export async function createVideoBatchJobs(params: {
       webhookUrl: item.webhook_url || null,
     });
   }
-  await db.insert(renderJobs).values(rows);
+  await insertJobs(params.projectId, rows);
   return {
     batchUid,
     uids,

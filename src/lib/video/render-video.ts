@@ -15,8 +15,11 @@
  * matter which renderer runs.
  */
 import { promises as fs } from "fs";
+import { rasterExportIssue } from "@/lib/design/raster-budget";
 import { config } from "@/lib/config";
-import { storageFilePath } from "@/lib/storage";
+import os from "node:os";
+import path from "node:path";
+import { withRenderSlot } from "@/lib/security/render-budget";
 import { prepareDesignForRender } from "@/lib/render/prepare-design";
 import type { CustomFontRef } from "@/lib/render/render-image";
 import { buildTimeline } from "./timeline";
@@ -26,61 +29,12 @@ import { chooseRenderer } from "./renderer-choice";
 import { renderVideoWithChromium } from "./render-video-chromium";
 import { renderVideoWithFfmpeg } from "./render-video-ffmpeg";
 
-const VIDEO_RENDER_TIMEOUT_MS = config.VIDEO_RENDER_TIMEOUT_MS;
-const VIDEO_CONCURRENCY = Math.max(1, config.VIDEO_CONCURRENCY);
-
-let activeVideoRenders = 0;
-const waiters: Array<() => void> = [];
-
-async function acquireVideoSlot(): Promise<() => void> {
-  if (activeVideoRenders < VIDEO_CONCURRENCY) {
-    activeVideoRenders += 1;
-    return releaseVideoSlot;
-  }
-  await new Promise<void>((resolve) => waiters.push(resolve));
-  activeVideoRenders += 1;
-  return releaseVideoSlot;
+export function renderVideoToBuffer(opts: RenderVideoOptions): Promise<RenderVideoResult> {
+  return withRenderSlot(() => renderVideoInner(opts), "video");
 }
 
-function releaseVideoSlot() {
-  activeVideoRenders = Math.max(0, activeVideoRenders - 1);
-  const next = waiters.shift();
-  if (next) next();
-}
-
-function withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  return Promise.race([
-    work,
-    new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} after ${Math.round(ms / 1000)}s`)), ms);
-    }),
-  ]).finally(() => clearTimeout(timer)) as Promise<T>;
-}
-
-export async function renderVideoToBuffer(opts: RenderVideoOptions): Promise<RenderVideoResult> {
-  const release = await acquireVideoSlot();
-  try {
-    return await withTimeout(renderVideoInner(opts), VIDEO_RENDER_TIMEOUT_MS, "Video render timed out");
-  } finally {
-    release();
-  }
-}
-
-/**
- * Test/driver entry point: run the dispatcher against an already-prepared
- * design (images inlined) without touching the asset database.
- */
-export async function renderVideoToBufferPrepared(
-  opts: RenderVideoOptions,
-  customFonts: CustomFontRef[] = []
-): Promise<RenderVideoResult> {
-  const release = await acquireVideoSlot();
-  try {
-    return await withTimeout(renderVideoInner(opts, { designJson: opts.designJson, customFonts }), VIDEO_RENDER_TIMEOUT_MS, "Video render timed out");
-  } finally {
-    release();
-  }
+export function renderVideoToBufferPrepared(opts: RenderVideoOptions, customFonts: CustomFontRef[] = []): Promise<RenderVideoResult> {
+  return withRenderSlot(() => renderVideoInner(opts, { designJson: opts.designJson, customFonts }), "video");
 }
 
 async function renderVideoInner(
@@ -93,6 +47,9 @@ async function renderVideoInner(
 
   const evenWidth = Math.ceil((opts.width * outputScale) / 2) * 2;
   const evenHeight = Math.ceil((opts.height * outputScale) / 2) * 2;
+  const pixelIssue = rasterExportIssue(evenWidth,evenHeight,1);
+  if (pixelIssue) throw new Error(pixelIssue);
+  if (timeline.layers.length > 32 || timeline.layers.some(l => rasterExportIssue(l.boxW,l.boxH,outputScale) || l.trimEnd-l.trimStart > config.VIDEO_MAX_OUTPUT_SEC)) throw new Error("Video layer exceeds render budget");
   const warnings: string[] = [];
   if (evenWidth !== opts.width * outputScale || evenHeight !== opts.height * outputScale) {
     warnings.push(`Output dimensions rounded to even size ${evenWidth}x${evenHeight} for H.264 compatibility`);
@@ -115,10 +72,8 @@ async function renderVideoInner(
       `${reason ? ` (${reason})` : ""}`
   );
 
-  const tmpDir = storageFilePath(`tmp/${opts.uid}`);
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "canolite-video-"));
   try {
-    await fs.rm(tmpDir, { recursive: true, force: true });
-    await fs.mkdir(tmpDir, { recursive: true });
 
     const ctx: PreparedVideoRender = {
       uid: opts.uid,

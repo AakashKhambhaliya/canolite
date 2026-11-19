@@ -3,7 +3,7 @@ import { db } from "@/db";
 import { renderJobs } from "@/db/schema";
 import { eq, and, or } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
-import { deleteFile } from "@/lib/storage";
+import { deleteRenderRow } from "@/lib/render/cleanup";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -114,19 +114,8 @@ export async function DELETE(
       );
     }
 
-    // Remove stored output files (best-effort).
-    for (const url of [job.imageUrl, job.outputUrl, job.posterUrl]) {
-      if (url) {
-        const marker = "/storage/";
-        const idx = url.indexOf(marker);
-        if (idx !== -1) {
-          await deleteFile(url.slice(idx + marker.length));
-        }
-      }
-    }
-
-    await db.delete(renderJobs).where(eq(renderJobs.id, job.id));
-
+    const outcome = await deleteRenderRow(job.id,eq(renderJobs.projectId,user.projectId));
+    if (outcome === "pending") return NextResponse.json({error:"Could not remove stored files. Deletion is pending and will be retried."},{status:503});
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Error deleting render:", error);

@@ -1,3 +1,5 @@
+import { createRenderPage, RENDER_ORIGIN, RENDER_CSP } from "@/lib/security/render-page";
+import { withRenderSlot } from "@/lib/security/render-budget";
 /**
  * Render engine (Phase 1 — implemented).
  *
@@ -8,6 +10,9 @@
  */
 import { promises as fs } from "fs";
 import path from "path";
+import { rasterExportIssue } from "@/lib/design/raster-budget";
+import { createArtworkVerifier } from "@/lib/design/loaded-artwork";
+import { CANOLITE_ORIGIN } from "@/lib/editor/fabric-defaults";
 import sharp from "sharp";
 import type { Browser } from "playwright";
 import googleFontsRaw from "@/lib/editor/google-fonts.json";
@@ -28,7 +33,7 @@ export interface CustomFontRef {
 }
 
 // Collect every fontFamily referenced in a design (recursing into groups).
-function collectFamilies(designJson: any): string[] {
+export function collectFamilies(designJson: any): string[] {
   const set = new Set<string>();
   walkDesignObjects(designJson, ({ object: o }) => {
     if (o?.fontFamily) set.add(o.fontFamily);
@@ -99,7 +104,9 @@ let fabricSource: string | null = null;
 export async function getFabricSource(): Promise<string> {
   if (fabricSource) return fabricSource;
   const p = path.join(process.cwd(), "node_modules", "fabric", "dist", "index.min.js");
-  fabricSource = await fs.readFile(p, "utf8");
+  // One renderer bootstrap for stills and Chromium MP4 frames. Older
+  // documents omit origins; Fabric 7 otherwise interprets them as centered.
+  fabricSource = (await fs.readFile(p, "utf8")) + `\n;Object.assign(window.fabric.BaseFabricObject.ownDefaults,${JSON.stringify(CANOLITE_ORIGIN)});`;
   return fabricSource;
 }
 
@@ -125,7 +132,8 @@ export async function getBrowser(): Promise<Browser> {
       const { chromium } = await import("playwright");
       const browser = await chromium.launch({
         headless: true,
-        args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+        chromiumSandbox: true,
+        args: ["--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking", "--host-resolver-rules=MAP * ~NOTFOUND"],
       }).catch((e: unknown) => {
         // Playwright's own message points at `npx playwright install`, which
         // installs whatever version npx resolves from the registry — not
@@ -194,6 +202,10 @@ export interface RenderResult {
 }
 
 export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult> {
+  return withRenderSlot(() => renderImage(opts));
+}
+
+async function renderImage(opts: RenderOptions): Promise<RenderResult> {
   const {
     designJson,
     width,
@@ -205,24 +217,24 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
     customFonts = [],
   } = opts;
 
+  // Thumbnails of very large artboards should allocate the thumbnail, not
+  // the full native surface. Apply the pixel budget before launching Chromium.
+  const outWidth = Math.max(1, Math.round(width * scale));
+  const outHeight = Math.max(1, Math.round(height * scale));
+  const issue = rasterExportIssue(outWidth, outHeight, 1);
+  if (issue || !(scale > 0 && width > 0 && height > 0)) throw new Error(issue || "Invalid render dimensions.");
   const families = collectFamilies(designJson);
   const fontHead = buildFontHead(families, customFonts);
   const fabric = await getFabricSource();
   const browser = await getBrowser();
-  const page = await browser.newPage({
-    viewport: { width: 16, height: 16 },
-    deviceScaleFactor: 1,
-  });
+  const page = await createRenderPage(browser);
   page.setDefaultTimeout(RENDER_TIMEOUT_MS);
   page.setDefaultNavigationTimeout(RENDER_TIMEOUT_MS);
 
   try {
-    // <base> lets relative storage URLs (/storage/...) in the design and fonts
-    // resolve inside the headless page. Point it at the app's own local listen
-    // address so it works on whatever port the server runs on (no APP_URL needed).
-    const base = `http://127.0.0.1:${process.env.PORT || "3000"}`;
+    const base = RENDER_ORIGIN;
     await page.setContent(
-      `<!doctype html><html><head><meta charset="utf-8">
+      `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${RENDER_CSP}">
        <base href="${base}/">
        <style>html,body{margin:0;padding:0;background:#fff}</style>
        ${fontHead}
@@ -232,8 +244,9 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
       { waitUntil: "load" }
     );
 
+    const verify = await page.evaluateHandle(createArtworkVerifier);
     const renderInPage = page.evaluate(
-      async ({ designJson, width, height, scale, background, families }) => {
+      async ({ designJson, width, height, scale, background, families, verify }) => {
         // @ts-ignore — fabric is injected globally
         const f = (window as any).fabric;
         const el = document.getElementById("c") as HTMLCanvasElement;
@@ -274,16 +287,20 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
         markCors((designJson as any)?.objects);
 
         await canvas.loadFromJSON(designJson);
+        verify(designJson, canvas);
+        canvas.setZoom(scale);
+        if (background && !canvas.backgroundColor) canvas.backgroundColor = background;
         canvas.renderAll();
-        return canvas.toDataURL({ format: "png", multiplier: scale });
+        return el.toDataURL("image/png");
       },
       {
         designJson,
-        width,
-        height,
+        width: outWidth,
+        height: outHeight,
         scale,
         background: background || designJson?.background,
         families,
+        verify,
       }
     );
 
@@ -322,6 +339,6 @@ export async function renderToBuffer(opts: RenderOptions): Promise<RenderResult>
   } finally {
     // Never let a close failure replace the real error — and on the timeout
     // path this is what actually tears down the runaway page.
-    await page.close().catch(() => {});
+    await page.context().close().catch(() => {});
   }
 }
