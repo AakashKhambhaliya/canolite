@@ -197,6 +197,30 @@ function bootstrapTests() {
 // Database transport (TLS)
 // =============================================================
 
+function renderErrorTests() {
+  console.log("\n🛡️  Render error messages");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { renderErrorMessage } = require("../../src/lib/render/error-message");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { createArtworkVerifier } = require("../../src/lib/design/loaded-artwork");
+  const browserError = new Error(
+    "page.evaluate: Error: Some layers could not be opened.\n    at a (eval at evaluate (:302:30), <anonymous>:1:202)\n    at async <anonymous>:328:30"
+  );
+  assert(renderErrorMessage(browserError) === "Some layers could not be opened.", "browser prefix and stack are stripped");
+  assert(renderErrorMessage(new Error("Remote image returned HTTP 403")) === "Remote image returned HTTP 403", "plain messages are unchanged");
+  assert(renderErrorMessage("nope") === "Render failed", "non-errors get a generic message");
+
+  const verify = createArtworkVerifier();
+  let message = "";
+  try {
+    verify(
+      { objects: [{ type: "Rect" }, { type: "Image", name: "photo", src: "/api/placeholder?w=1" }] },
+      { getObjects: () => [{}] }
+    );
+  } catch (e) { message = (e as Error).message; }
+  assert(message.includes('"photo" (/api/placeholder?w=1)'), "a dropped layer names the image layers to check");
+}
+
 function databaseTransportTests() {
   console.log("\n🛡️  Database transport");
 
@@ -294,6 +318,7 @@ async function main() {
   webhookTests();
   bootstrapTests();
   databaseTransportTests();
+  renderErrorTests();
   await renderBodyTests();
 
   console.log("\n================================================================");

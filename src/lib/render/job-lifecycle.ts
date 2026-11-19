@@ -5,6 +5,8 @@ import { uploadFile } from "@/lib/storage";
 import { renderSignal, withMediaProject, withRenderSlot } from "@/lib/security/render-budget";
 import { notifyJob } from "./job-webhook";
 
+import { renderErrorMessage } from "./error-message";
+
 type Job = typeof renderJobs.$inferSelect;
 type Product = {
   files: {key: string; bytes: Buffer; type: string}[];
@@ -44,7 +46,7 @@ export async function runJob(uid: string, kind: "image" | "video", opts: {rethro
     await notifyJob(claimed, `${event}.completed`, published);
   } else if (failure) {
     if (claimed) {
-      const [failed] = await db.update(renderJobs).set({status:"failed",errorMessage:failure instanceof Error ? failure.message : "Render failed",durationMs:Date.now()-started,completedAt:new Date()})
+      const [failed] = await db.update(renderJobs).set({status:"failed",errorMessage:renderErrorMessage(failure),durationMs:Date.now()-started,completedAt:new Date()})
         .where(and(eq(renderJobs.id,claimed.id),eq(renderJobs.status,"processing"))).returning({id:renderJobs.id});
       if (failed) await notifyJob(claimed, `${event}.failed`, {status:"failed",error:"Render failed; see authenticated job status."});
     }

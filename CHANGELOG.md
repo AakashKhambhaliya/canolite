@@ -4,6 +4,18 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.12.1
+
+**Clearer render failures.** A failed render's message (dashboard, API and the
+n8n node) no longer carries the browser's `page.evaluate: Error:` prefix and
+stack trace. When an image layer cannot be loaded, the error now names the
+image layers to check, e.g. `Some layers could not be opened. Check that these
+image layers point to an uploaded file or a public image URL: "photo" (…)`.
+
+Pairs with **n8n-nodes-canolite 2.1.0**, which shows these messages instead of
+n8n's generic "Your request is invalid or could not be processed by the
+service".
+
 ## v1.12.0
 
 **New Studio editor.** The template editor is rebuilt on Fabric 7 with a
