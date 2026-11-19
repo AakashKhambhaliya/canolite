@@ -345,6 +345,7 @@ If `DATABASE_URL` is unset, Canolite starts embedded PostgreSQL on `127.0.0.1` u
 | `STORAGE_DIR` | `public/storage` | Where rendered output and uploads are written. Docker sets `/app/data/storage`. |
 | `BACKUP_DIR` | `./.backups` | Where pre-migration database backups are written. Falls back to `/app/data/backups` automatically when that directory exists (i.e. in Docker). |
 | `RENDER_CONCURRENCY` | `3` | Maximum in-process image renders at once |
+| `CHROMIUM_SANDBOX` | `auto` | `auto` uses Chromium's sandbox when the host allows it and runs without it otherwise (Docker/Coolify usually block it); `on` requires it; `off` never uses it |
 | `MAX_UPLOAD_MB` | `10` | Max image/font upload file size |
 | `MAX_VIDEO_UPLOAD_MB` | `100` | Max video upload size in MB. The request-body limit follows this value, so raising it raises both. |
 | `MAX_VIDEO_DURATION_SEC` | `60` | Max uploaded source video duration in seconds |

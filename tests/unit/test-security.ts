@@ -209,6 +209,18 @@ function renderErrorTests() {
   assert(renderErrorMessage(browserError) === "Some layers could not be opened.", "browser prefix and stack are stripped");
   assert(renderErrorMessage(new Error("Remote image returned HTTP 403")) === "Remote image returned HTTP 403", "plain messages are unchanged");
   assert(renderErrorMessage("nope") === "Render failed", "non-errors get a generic message");
+  const launch = renderErrorMessage(new Error(
+    "browserType.launch: Target page, context or browser has been closed\nBrowser logs:\n\nChromium sandboxing failed!\n================================\nTo avoid the sandboxing issue...\n================================\nCall log:\n  - <launching> /ms-playwright/chromium_headless_shell-1223/chrome-linux/headless_shell --disable-field-trial-config --no-startup-window"
+  ));
+  assert(!launch.includes("Call log") && !launch.includes("--disable-field-trial-config") && !launch.includes("====="), "launch errors drop the Chromium call log and banners");
+  assert(launch.startsWith("Target page, context or browser has been closed") && launch.includes("Chromium sandboxing failed!"), "launch errors keep the reason");
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { chromiumSandboxMode, isSandboxFailure } = require("../../src/lib/render/render-image");
+  assert(chromiumSandboxMode(undefined) === "auto" && chromiumSandboxMode("off") === "off" && chromiumSandboxMode("ON") === "on" && chromiumSandboxMode("weird") === "auto", "CHROMIUM_SANDBOX parses on/off/auto");
+  assert(isSandboxFailure(new Error("[pid=94][err] FATAL:zygote_host_impl_linux.cc:128] No usable sandbox!")), "Docker's 'No usable sandbox' is recognised as a sandbox failure");
+  assert(isSandboxFailure(new Error("Chromium sandboxing failed!")), "Playwright's 'sandboxing failed' is recognised");
+  assert(!isSandboxFailure(new Error("Executable doesn't exist at /ms-playwright")), "a missing browser is not mistaken for a sandbox failure");
 
   const verify = createArtworkVerifier();
   let message = "";

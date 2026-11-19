@@ -1,6 +1,6 @@
 {
   "name": "canolite",
-  "version": "1.12.1",
+  "version": "1.12.2",
   "private": true,
   "license": "MIT",
   "scripts": {
@@ -18,7 +18,7 @@
     "db:backup": "tsx src/db/backup.ts",
     "worker": "tsx src/queue/worker.ts",
     "test": "npm run test:unit",
-    "test:unit": "tsx tests/unit/test-all.ts && tsx tests/unit/test-video-fast-path.ts && tsx tests/unit/test-ordered-frame-pipeline.ts && tsx tests/unit/test-security.ts && tsx --test tests/editor/limits.test.ts",
+    "test:unit": "tsx tests/unit/test-all.ts && tsx tests/unit/test-video-fast-path.ts && tsx tests/unit/test-ordered-frame-pipeline.ts && tsx tests/unit/test-security.ts && tsx tests/unit/test-sandbox-fallback.ts && tsx --test tests/editor/limits.test.ts",
     "test:comparison": "tsx tests/comparison/compare-paths.ts",
     "test:studio": "node tests/editor/studio-smoke.mjs && node tests/editor/studio-resilience.mjs",
     "typecheck": "tsc --noEmit",

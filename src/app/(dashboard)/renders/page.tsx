@@ -494,14 +494,18 @@ function RendersContent() {
         open={!!selectedRender}
         onOpenChange={() => setSelectedRender(null)}
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="font-mono">
+        {/* The content box is a CSS grid, whose children default to
+            min-width: auto — one long unbroken token (a URL, a Chromium flag)
+            then widened the whole dialog past the screen. min-w-0 + wrapping
+            keeps everything inside; tall content scrolls. */}
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader className="min-w-0">
+            <DialogTitle className="font-mono break-all">
               {selectedRender?.uid}
             </DialogTitle>
           </DialogHeader>
           {selectedRender && (
-            <div className="space-y-4">
+            <div className="space-y-4 min-w-0">
               {/* Preview */}
               {selectedRender.imageUrl && (
                 <div className="rounded-lg overflow-hidden bg-muted">
@@ -589,10 +593,26 @@ function RendersContent() {
 
               {/* Error */}
               {selectedRender.errorMessage && (
-                <div className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900 rounded-lg">
-                  <p className="text-sm text-red-700 dark:text-red-400 font-mono">
-                    {selectedRender.errorMessage}
-                  </p>
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">Error</span>
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+                      onClick={() => {
+                        copyToClipboard(selectedRender.errorMessage);
+                        toast.success("Error copied");
+                      }}
+                    >
+                      <Copy className="h-3 w-3" />
+                      Copy
+                    </button>
+                  </div>
+                  <div className="mt-1 p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900 rounded-lg max-h-48 overflow-y-auto">
+                    <p className="text-xs text-red-700 dark:text-red-400 font-mono whitespace-pre-wrap [overflow-wrap:anywhere]">
+                      {selectedRender.errorMessage}
+                    </p>
+                  </div>
                 </div>
               )}
 
@@ -602,14 +622,14 @@ function RendersContent() {
                   <span className="text-sm text-muted-foreground">
                     Modifications
                   </span>
-                  <pre className="mt-1 p-3 bg-muted rounded-lg text-xs overflow-auto max-h-40 font-mono">
+                  <pre className="mt-1 p-3 bg-muted rounded-lg text-xs overflow-auto max-h-40 font-mono whitespace-pre-wrap [overflow-wrap:anywhere]">
                     {JSON.stringify(selectedRender.modifications, null, 2)}
                   </pre>
                 </div>
               )}
 
               {/* Actions */}
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 {selectedRender.imageUrl && (
                   <>
                     <Button

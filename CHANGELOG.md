@@ -4,6 +4,21 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.12.2
+
+**Renders work in Docker again.** v1.12.0 launched Chromium with its sandbox
+switched on, which Docker (Coolify, Dokploy, plain `docker run`) does not
+allow, so every render failed with "Chromium sandboxing failed! … No usable
+sandbox". Chromium now uses the sandbox only where the host supports it and
+otherwise falls back to running without it — as every release before 1.12
+did — with a one-time log warning. Renders stay confined to approved files
+either way. `CHROMIUM_SANDBOX=on|off|auto` (default `auto`) overrides this.
+
+**Render details dialog no longer overflows.** A long error or a long URL in
+the modifications pushed the dialog past the edge of the screen. Both now wrap,
+the error scrolls and has a Copy button, and the dialog scrolls when tall.
+Stored errors also drop Playwright's long "Call log" of Chromium flags.
+
 ## v1.12.1
 
 **Clearer render failures.** A failed render's message (dashboard, API and the

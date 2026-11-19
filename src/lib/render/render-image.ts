@@ -114,7 +114,51 @@ export async function getFabricSource(): Promise<string> {
 const globalForBrowser = globalThis as unknown as {
   __canoliteBrowser?: Browser;
   __canoliteBrowserPromise?: Promise<Browser>;
+  __canoliteSandboxWarned?: boolean;
 };
+
+/**
+ * CHROMIUM_SANDBOX: "auto" (default) uses the sandbox when the host supports
+ * it and falls back without it otherwise; "on" requires it; "off" never uses it.
+ */
+export function chromiumSandboxMode(value = process.env.CHROMIUM_SANDBOX): "auto" | "on" | "off" {
+  const v = (value || "auto").trim().toLowerCase();
+  if (["on", "true", "1", "require", "required"].includes(v)) return "on";
+  if (["off", "false", "0", "disable", "disabled"].includes(v)) return "off";
+  return "auto";
+}
+
+export function isSandboxFailure(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /No usable sandbox|sandboxing failed|zygote_host|setuid sandbox|credentials\.cc|Operation not permitted.*namespace/i.test(msg);
+}
+
+/**
+ * Launch with Chromium's sandbox when the host allows it.
+ *
+ * Docker (Coolify, Dokploy, plain `docker run`) blocks the user namespaces the
+ * sandbox needs, so a sandboxed launch dies with "No usable sandbox". In auto
+ * mode fall back to an unsandboxed browser — how every release before 1.12
+ * ran — instead of failing every render. Renders stay confined by the request
+ * interception in lib/security/render-page.ts either way.
+ */
+export async function launchChromium<T>(
+  launch: (sandbox: boolean) => Promise<T>,
+  mode: "auto" | "on" | "off",
+  warn: (message: string) => void
+): Promise<T> {
+  if (mode === "off") return launch(false);
+  try {
+    return await launch(true);
+  } catch (error) {
+    if (mode !== "auto" || !isSandboxFailure(error)) throw error;
+    warn(
+      "[render] Chromium's sandbox is unavailable in this environment (usual inside Docker); " +
+        "launching without it. Set CHROMIUM_SANDBOX=on to require it, or CHROMIUM_SANDBOX=off to skip this check."
+    );
+    return launch(false);
+  }
+}
 
 export async function getBrowser(): Promise<Browser> {
   if (globalForBrowser.__canoliteBrowser?.isConnected()) {
@@ -130,11 +174,20 @@ export async function getBrowser(): Promise<Browser> {
   if (!globalForBrowser.__canoliteBrowserPromise) {
     globalForBrowser.__canoliteBrowserPromise = (async () => {
       const { chromium } = await import("playwright");
-      const browser = await chromium.launch({
-        headless: true,
-        chromiumSandbox: true,
-        args: ["--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking", "--host-resolver-rules=MAP * ~NOTFOUND"],
-      }).catch((e: unknown) => {
+      const browser = await launchChromium(
+        (sandbox) =>
+          chromium.launch({
+            headless: true,
+            chromiumSandbox: sandbox,
+            args: ["--disable-gpu", "--disable-dev-shm-usage", "--disable-background-networking", "--host-resolver-rules=MAP * ~NOTFOUND"],
+          }),
+        chromiumSandboxMode(),
+        (message) => {
+          if (globalForBrowser.__canoliteSandboxWarned) return;
+          globalForBrowser.__canoliteSandboxWarned = true;
+          console.warn(message);
+        }
+      ).catch((e: unknown) => {
         // Playwright's own message points at `npx playwright install`, which
         // installs whatever version npx resolves from the registry — not
         // necessarily the one this app has. Name the deterministic command.
