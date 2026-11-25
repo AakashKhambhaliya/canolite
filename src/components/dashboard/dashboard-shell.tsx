@@ -101,7 +101,12 @@ export function DashboardShell({ children, user }: DashboardShellProps) {
           )}
         >
           {/* Logo */}
-          <div className="h-16 flex items-center justify-between px-4 border-b border-gray-200 dark:border-gray-800">
+          <div
+            className={cn(
+              "relative h-16 flex items-center border-b border-gray-200 dark:border-gray-800",
+              collapsed ? "justify-center px-0" : "justify-between px-4"
+            )}
+          >
             <Link href="/" className="flex items-center gap-2.5 min-w-0">
               <Logo size={32} className="shrink-0 rounded-lg" />
               {!collapsed && (
@@ -110,10 +115,18 @@ export function DashboardShell({ children, user }: DashboardShellProps) {
                 </span>
               )}
             </Link>
+            {/* Collapsed, the rail is too narrow for the logo and the toggle
+                side by side, so the toggle sits on the rail's right edge. */}
             <Button
               variant="ghost"
               size="icon-sm"
-              className="hidden lg:flex shrink-0"
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className={cn(
+                "hidden lg:flex shrink-0",
+                collapsed &&
+                  "absolute -right-3 top-1/2 z-10 h-6 w-6 -translate-y-1/2 rounded-full border border-gray-200 bg-white shadow-sm hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:hover:bg-gray-800"
+              )}
               onClick={() => setCollapsed(!collapsed)}
             >
               <ChevronLeft

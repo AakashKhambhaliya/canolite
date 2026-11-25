@@ -42,7 +42,9 @@ import {
   PanelLeftClose,
   Minimize,
   Image as ImageIcon,
+  AlignCenterVertical,
 } from "lucide-react";
+import { ALIGN_OPTIONS, DISTRIBUTE_OPTIONS, type Alignment } from "./align";
 import {
   Dialog,
   DialogContent,
@@ -453,6 +455,7 @@ export function StageToolbar({
   inspect,
   layers,
   update,
+  align,
   duplicate,
   remove,
   settings,
@@ -472,6 +475,7 @@ export function StageToolbar({
   inspect: () => void;
   layers: () => void;
   update: (k: string, v: any) => void;
+  align: (m: Alignment) => void;
   duplicate: () => void;
   remove: () => void;
   settings: () => void;
@@ -485,6 +489,7 @@ export function StageToolbar({
   const t = active?.type || "";
   const isText = /text/i.test(t);
   const multi = t === "activeselection";
+  const selectedCount = multi ? active.getObjects().length : 0;
   const fill = String(active?.fill || "#222222");
   return (
     <div className="sl-toolbar-wrap">
@@ -523,18 +528,52 @@ export function StageToolbar({
           </>
         ) : (
           <>
-            <button className="sl-ctrl" onClick={inspect}>
-              {isText ? (
-                <Type size={15} />
-              ) : t === "image" ? (
-                <ImageIcon size={15} />
-              ) : (
-                <SlidersHorizontal size={15} />
-              )}
-              <span>
-                {multi ? "Align" : isText ? "Edit text" : "Edit layer"}
-              </span>
-            </button>
+            {multi ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="sl-ctrl" aria-label="Align selection">
+                    <AlignCenterVertical size={15} />
+                    <span>Align</span>
+                    <ChevronDown size={13} />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="sl-menu" align="start">
+                  {ALIGN_OPTIONS.map(({ id, label, i: I }) => (
+                    <DropdownMenuItem key={id} onSelect={() => align(id)}>
+                      <I />
+                      {label}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  {DISTRIBUTE_OPTIONS.map(({ id, label, i: I }) => (
+                    <DropdownMenuItem
+                      key={id}
+                      disabled={selectedCount < 3}
+                      onSelect={() => align(id)}
+                    >
+                      <I />
+                      {label}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={inspect}>
+                    <SlidersHorizontal />
+                    Align to artboard…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <button className="sl-ctrl" onClick={inspect}>
+                {isText ? (
+                  <Type size={15} />
+                ) : t === "image" ? (
+                  <ImageIcon size={15} />
+                ) : (
+                  <SlidersHorizontal size={15} />
+                )}
+                <span>{isText ? "Edit text" : "Edit layer"}</span>
+              </button>
+            )}
             {isText && (
               <>
                 <IconButton

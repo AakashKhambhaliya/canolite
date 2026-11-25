@@ -1,14 +1,9 @@
 "use client";
+import { useState } from "react";
 import {
   AlignCenter,
   AlignLeft,
   AlignRight,
-  ArrowDownToLine,
-  ArrowLeftToLine,
-  ArrowRightToLine,
-  ArrowUpToLine,
-  AlignCenterHorizontal,
-  AlignCenterVertical,
   Copy,
   Layers3,
   Pause,
@@ -20,23 +15,22 @@ import {
 import { FontPicker, type CustomFont } from "@/components/editor/font-picker";
 import type { VideoPreviewState } from "@/lib/editor/video-preview";
 import { IconButton } from "./chrome";
-export type Alignment =
-  | "left"
-  | "centerH"
-  | "right"
-  | "top"
-  | "middle"
-  | "bottom";
+import {
+  ALIGN_OPTIONS,
+  DISTRIBUTE_OPTIONS,
+  type Alignment,
+  type AlignTarget,
+} from "./align";
 interface Props {
   object: any;
-  update: (key: string, v: any) => void;
+  update: (key: string | Record<string, any>, v?: any) => void;
   fonts: CustomFont[];
   applyFont: (s: string) => void;
   uploadFont: (f: File) => Promise<void>;
   replace: () => void;
   remove: () => void;
   duplicate: () => void;
-  align: (m: Alignment) => void;
+  align: (m: Alignment, to?: AlignTarget) => void;
   showLayers: () => void;
   videoCount: number;
   preview: VideoPreviewState;
@@ -76,6 +70,49 @@ function Num({
           const n = Number(e.target.value);
           if (Number.isFinite(n))
             onChange(Math.max(min ?? -Infinity, Math.min(max ?? Infinity, n)));
+        }}
+      />
+    </label>
+  );
+}
+// A whole-pixel size box that applies on Enter / blur (or straight away for the
+// spinner arrows and arrow keys) instead of on every keystroke — typing "1200"
+// would otherwise resize the layer to 1, 12 and 120 px on the way, with an
+// undo step for each.
+function SizeNum({
+  label,
+  value,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  onCommit: (v: number) => void;
+}) {
+  const shown = Number.isFinite(value) ? Math.round(value) : 0;
+  const [draft, setDraft] = useState<string | null>(null);
+  const apply = (raw: string) => {
+    setDraft(null);
+    const n = Math.round(Number(raw));
+    if (raw !== "" && Number.isFinite(n) && n >= 1 && n !== shown) onCommit(n);
+  };
+  return (
+    <label>
+      {label}
+      <input
+        aria-label={label}
+        type="number"
+        min={1}
+        step={1}
+        value={draft ?? shown}
+        onChange={(e) => {
+          // Typing reports an inputType; spinner clicks and arrow keys don't.
+          if ((e.nativeEvent as InputEvent).inputType) setDraft(e.target.value);
+          else apply(e.target.value);
+        }}
+        onBlur={() => draft !== null && apply(draft)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && draft !== null) apply(draft);
+          else if (e.key === "Escape") setDraft(null);
         }}
       />
     </label>
@@ -128,9 +165,59 @@ function Toggle({
     </label>
   );
 }
+// Width / height boxes for image and video layers. Fabric sizes images through
+// scaleX / scaleY over their natural width / height, so the boxes show the
+// rendered size in pixels and convert edits back to a scale.
+function ImageSize({
+  o,
+  up,
+}: {
+  o: any;
+  up: (key: string | Record<string, any>, v?: any) => void;
+}) {
+  const [locked, setLocked] = useState(true);
+  const baseW = o.width || 1,
+    baseH = o.height || 1;
+  const sx = Math.abs(o.scaleX ?? 1),
+    sy = Math.abs(o.scaleY ?? 1);
+  // Keep any flip (negative scale) when changing the size.
+  const sign = (s: number | undefined) => ((s ?? 1) < 0 ? -1 : 1);
+  const setWidth = (w: number) => {
+    const nx = w / baseW;
+    up(
+      locked
+        ? {
+            scaleX: nx * sign(o.scaleX),
+            scaleY: (nx * sy * sign(o.scaleY)) / sx,
+          }
+        : { scaleX: nx * sign(o.scaleX) },
+    );
+  };
+  const setHeight = (h: number) => {
+    const ny = h / baseH;
+    up(
+      locked
+        ? {
+            scaleY: ny * sign(o.scaleY),
+            scaleX: (ny * sx * sign(o.scaleX)) / sy,
+          }
+        : { scaleY: ny * sign(o.scaleY) },
+    );
+  };
+  return (
+    <>
+      <div className="sl-2cols">
+        <SizeNum label="Width (px)" value={baseW * sx} onCommit={setWidth} />
+        <SizeNum label="Height (px)" value={baseH * sy} onCommit={setHeight} />
+      </div>
+      <Toggle label="Lock aspect ratio" checked={locked} change={setLocked} />
+    </>
+  );
+}
 export function Inspector(p: Props) {
   const o = p.object;
   const up = p.update;
+  const [alignTo, setAlignTo] = useState<AlignTarget>("selection");
   const type = o?.type || "";
   const clock = (s: number) =>
     `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
@@ -145,42 +232,70 @@ export function Inspector(p: Props) {
         </button>
       </div>
     );
-  if (type === "activeselection")
+  if (type === "activeselection") {
+    const count = o.getObjects().length;
     return (
       <>
         <div className="sl-section-label">
-          <span>{o.getObjects().length} layers selected</span>
+          <span>{count} layers selected</span>
         </div>
+        <label>
+          Align to
+          <select
+            aria-label="Align to"
+            value={alignTo}
+            onChange={(e) => setAlignTo(e.target.value as AlignTarget)}
+          >
+            <option value="selection">Selection</option>
+            <option value="artboard">Artboard</option>
+          </select>
+        </label>
         <p className="sl-fine">
-          Align the selected objects within their shared bounds.
+          {alignTo === "artboard"
+            ? "Line each object up with the artboard's edges or center."
+            : "Line the objects up within their shared bounds."}
         </p>
         <div className="sl-align-grid">
-          {(
-            [
-              { id: "left", i: ArrowLeftToLine },
-              { id: "centerH", i: AlignCenterVertical },
-              { id: "right", i: ArrowRightToLine },
-              { id: "top", i: ArrowUpToLine },
-              { id: "middle", i: AlignCenterHorizontal },
-              { id: "bottom", i: ArrowDownToLine },
-            ] as const
-          ).map(({ id, i: I }) => (
+          {ALIGN_OPTIONS.map(({ id, label, i: I }) => (
             <button
               key={id}
-              onClick={() => p.align(id)}
-              title={`Align ${id}`}
-              aria-label={`Align ${id}`}
+              onClick={() => p.align(id, alignTo)}
+              title={label}
+              aria-label={label}
             >
               <I size={18} />
             </button>
           ))}
         </div>
+        <div className="sl-section-label">
+          <span>Distribute</span>
+        </div>
+        <div className="sl-align-grid sl-align-grid-2">
+          {DISTRIBUTE_OPTIONS.map(({ id, label, i: I }) => (
+            <button
+              key={id}
+              onClick={() => p.align(id)}
+              disabled={count < 3}
+              title={
+                count < 3 ? "Select 3 or more layers to distribute" : label
+              }
+              aria-label={label}
+            >
+              <I size={18} />
+              {id === "distributeH" ? "Horizontal" : "Vertical"}
+            </button>
+          ))}
+        </div>
+        <p className="sl-fine">
+          Equal spacing between objects, keeping the outermost two in place.
+        </p>
         <button className="sl-secondary sl-fill" onClick={p.remove}>
           <Trash2 size={15} />
           Delete selection
         </button>
       </>
     );
+  }
   const isText = /text/.test(type),
     isImage = type === "image",
     isVideo = o.mediaType === "video";
@@ -311,6 +426,7 @@ export function Inspector(p: Props) {
           )}
         </>
       )}
+      {isImage && <ImageSize key={o.id || o.name} o={o} up={up} />}
       {isImage && !isVideo && (
         <button className="sl-secondary sl-fill" onClick={p.replace}>
           <Upload size={15} />

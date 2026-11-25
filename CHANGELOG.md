@@ -4,6 +4,26 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.13.0
+
+**Image size in the editor.** Image and video layers have Width and Height
+boxes (in pixels) in the Properties panel, with a Lock aspect ratio switch
+that is on by default. A new size applies on Enter or when you leave the box,
+counts as one undo step, and keeps a flipped image flipped.
+
+**More alignment for multiple layers.**
+
+- **Align to the artboard.** Besides lining layers up with each other, the
+  Properties panel can now line each selected layer up with the artboard's
+  edges or center.
+- **Distribute.** With 3 or more layers selected, Distribute horizontally or
+  vertically gives equal gaps between them, keeping the outermost two in place.
+- **Align menu in the toolbar.** With several layers selected, the toolbar's
+  Align button opens a menu with every align and distribute option.
+
+**Collapsed sidebar.** The dashboard's collapse arrow no longer covers the
+logo when the sidebar is collapsed; it sits on the sidebar's edge instead.
+
 ## v1.12.2
 
 **Renders work in Docker again.** v1.12.0 launched Chromium with its sandbox

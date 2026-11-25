@@ -1262,6 +1262,14 @@
 .sl-align-grid {
   margin: 12px 0;
 }
+.sl-align-grid.sl-align-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 6px;
+}
+.sl-align-grid button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .sl-danger {
   color: var(--sl-danger);
 }

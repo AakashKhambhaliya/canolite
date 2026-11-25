@@ -81,6 +81,7 @@ import {
   type TextKind,
 } from "./studio/library";
 import { Inspector } from "./studio/inspector";
+import type { Alignment, AlignTarget } from "./studio/align";
 import {
   STUDIO_PRESETS,
   presetDesign,
@@ -554,8 +555,12 @@ export function EditorWorkspace({
   // nested in the active selection, and `setXY` takes an absolute point and
   // converts it back to the selection-relative coordinates Fabric stores
   // internally — so this works without hand-rolling that conversion.
+  //
+  // `to: "artboard"` lines each object up with the artboard instead of the
+  // selection. "distributeH" / "distributeV" space 3+ objects evenly between
+  // the outermost two (equal gaps between their edges).
   const alignSelected = useCallback(
-    (mode: "left" | "centerH" | "right" | "top" | "middle" | "bottom") => {
+    (mode: Alignment, to: AlignTarget = "selection") => {
       const canvas = fabricCanvasRef.current;
       const active = canvas?.getActiveObject();
       // Fabric's runtime type string for a multi-selection is the all-lowercase
@@ -571,27 +576,63 @@ export function EditorWorkspace({
       const objects: any[] = active.getObjects();
       if (objects.length < 2) return;
 
-      const sel = active.getBoundingRect();
+      const fabric = fabricModule;
+      const move = (obj: any, dx: number, dy: number) => {
+        if (!dx && !dy) return;
+        const p = obj.getXY();
+        obj.setXY(new fabric.Point(p.x + dx, p.y + dy));
+        obj.setCoords();
+      };
 
-      for (const obj of objects) {
-        const bounds = obj.getBoundingRect();
-        let dx = 0;
-        let dy = 0;
-        if (mode === "left") dx = sel.left - bounds.left;
-        else if (mode === "centerH")
-          dx = sel.left + sel.width / 2 - (bounds.left + bounds.width / 2);
-        else if (mode === "right")
-          dx = sel.left + sel.width - (bounds.left + bounds.width);
-        else if (mode === "top") dy = sel.top - bounds.top;
-        else if (mode === "middle")
-          dy = sel.top + sel.height / 2 - (bounds.top + bounds.height / 2);
-        else if (mode === "bottom")
-          dy = sel.top + sel.height - (bounds.top + bounds.height);
+      if (mode === "distributeH" || mode === "distributeV") {
+        if (objects.length < 3) return;
+        const horiz = mode === "distributeH";
+        const start = (b: any) => (horiz ? b.left : b.top);
+        const size = (b: any) => (horiz ? b.width : b.height);
+        const items = objects
+          .map((obj) => ({ obj, b: obj.getBoundingRect() }))
+          .sort(
+            (a, b) => start(a.b) + size(a.b) / 2 - (start(b.b) + size(b.b) / 2),
+          );
+        const first = items[0].b,
+          last = items[items.length - 1].b;
+        const span = start(last) + size(last) - start(first);
+        const total = items.reduce((n, i) => n + size(i.b), 0);
+        const gap = (span - total) / (items.length - 1);
+        let cursor = start(first) + size(first) + gap;
+        for (const { obj, b } of items.slice(1, -1)) {
+          const d = cursor - start(b);
+          move(obj, horiz ? d : 0, horiz ? 0 : d);
+          cursor += size(b) + gap;
+        }
+      } else {
+        // Bounding rects are in artboard (scene) coordinates, so the artboard
+        // spans 0..canvas size divided by the current zoom.
+        const sel =
+          to === "artboard"
+            ? {
+                left: 0,
+                top: 0,
+                width: canvas.getWidth() / canvas.getZoom(),
+                height: canvas.getHeight() / canvas.getZoom(),
+              }
+            : active.getBoundingRect();
 
-        if (dx || dy) {
-          const p = obj.getXY();
-          obj.setXY(new fabricModule.Point(p.x + dx, p.y + dy));
-          obj.setCoords();
+        for (const obj of objects) {
+          const bounds = obj.getBoundingRect();
+          let dx = 0;
+          let dy = 0;
+          if (mode === "left") dx = sel.left - bounds.left;
+          else if (mode === "centerH")
+            dx = sel.left + sel.width / 2 - (bounds.left + bounds.width / 2);
+          else if (mode === "right")
+            dx = sel.left + sel.width - (bounds.left + bounds.width);
+          else if (mode === "top") dy = sel.top - bounds.top;
+          else if (mode === "middle")
+            dy = sel.top + sel.height / 2 - (bounds.top + bounds.height / 2);
+          else if (mode === "bottom")
+            dy = sel.top + sel.height - (bounds.top + bounds.height);
+          move(obj, dx, dy);
         }
       }
 
@@ -1709,11 +1750,14 @@ export function EditorWorkspace({
 
   // Update selected object property
   const updateProp = useCallback(
-    (key: string, value: any) => {
+    // Pass a key + value, or an object of several properties to set at once
+    // (one undo step — e.g. scaleX and scaleY when resizing with a locked ratio).
+    (key: string | Record<string, any>, value?: any) => {
       const canvas = fabricCanvasRef.current;
       const obj = canvas?.getActiveObject();
       if (!obj || !canvas) return;
-      obj.set(key as any, value);
+      if (typeof key === "string") obj.set(key as any, value);
+      else obj.set(key);
       obj.setCoords();
       canvas.renderAll();
       snapshotRef.current();
@@ -2110,6 +2154,7 @@ export function EditorWorkspace({
                 inspect={inspect}
                 layers={() => showPanel("Layers")}
                 update={updateProp}
+                align={alignSelected}
                 duplicate={duplicateSelected}
                 remove={removeSelected}
                 settings={() => setModal("settings")}
