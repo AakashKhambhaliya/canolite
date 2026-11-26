@@ -15,6 +15,11 @@ import { BodyError, readJsonBody, readJsonBodyOrNull } from "../../src/lib/json-
 import { buildTimeline, collectVideoLayers, MAX_PLAYBACK_RATE } from "../../src/lib/video/timeline";
 import { buildVideoChainFilters, enableWindowSec } from "../../src/lib/video/filtergraph";
 import { buildEncodeArgs } from "../../src/lib/video/encode";
+import { spawnFfmpegPipe } from "../../src/lib/video/ffmpeg";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import sharp from "sharp";
 import { createUrlSafetyChecker, TooManyHostsError } from "../../src/lib/ssrf";
 import { isUuid } from "../../src/lib/utils";
 import { walkDesignObjects } from "../../src/lib/design/walk";
@@ -91,6 +96,28 @@ test("encode: audio is padded to the timeline instead of -shortest", () => {
   assert.equal(args[args.indexOf("-t") + 1], "7");
   // The only audio input is input #1, even though it was the 2nd list entry.
   assert.ok(args[args.indexOf("-filter_complex") + 1].includes("[1:a]"));
+});
+
+test("encode: the real ffmpeg accepts frames piped on stdin (legacy MP4 path)", async () => {
+  // The input protocol whitelist once omitted "fd", which current ffmpeg uses
+  // for "-i -", so every legacy Chromium MP4 export died on its first frame.
+  const dir = await mkdtemp(path.join(os.tmpdir(), "canolite-pipe-"));
+  try {
+    const frame = await sharp({ create: { width: 64, height: 48, channels: 3, background: "#336699" } }).jpeg().toBuffer();
+    const child = spawnFfmpegPipe(
+      buildEncodeArgs({ outPath: path.join(dir, "out.mp4"), width: 64, height: 48, fps: 10, crf: 30, frameFormat: "jpeg", audioLayers: [] })
+    );
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    const closed = new Promise<number | null>((resolve) => child.once("close", resolve));
+    child.stdin.on("error", () => {});
+    for (let i = 0; i < 5; i++) child.stdin.write(frame);
+    child.stdin.end();
+    assert.equal(await closed, 0, stderr);
+    assert.ok((await stat(path.join(dir, "out.mp4"))).size > 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("url checker: caps distinct hosts and rejects non-public targets", async () => {

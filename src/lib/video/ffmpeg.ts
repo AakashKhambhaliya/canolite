@@ -3,8 +3,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 
 // All inputs have already been resolved to a local container, a rendered PNG,
 // or our own frame pipe. Do not let nested demuxers open network resources.
+// "fd" is how current ffmpeg opens stdin ("-i -"); without it the legacy
+// Chromium renderer's frame pipe was refused ("Protocol 'fd' not on
+// whitelist") and every legacy MP4 export failed. It only reads descriptors
+// ffmpeg already holds, so it grants no network or filesystem reach.
+export const FFMPEG_PROTOCOL_WHITELIST = "file,pipe,fd";
 function boundedArgs(args: string[]) {
-  return args.flatMap(a => a === "-i" ? ["-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm,image2pipe,png_pipe,image2,mjpeg", a] : [a]);
+  return args.flatMap(a => a === "-i" ? ["-protocol_whitelist", FFMPEG_PROTOCOL_WHITELIST, "-format_whitelist", "mov,matroska,webm,image2pipe,png_pipe,image2,mjpeg", a] : [a]);
 }
 function trackChild<T extends import("child_process").ChildProcess>(child: T) {
   const signal = renderSignal();

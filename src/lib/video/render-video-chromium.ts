@@ -304,7 +304,19 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
         }
       },
     });
-    await pipeline.run(timeline.frameCount);
+    try {
+      await pipeline.run(timeline.frameCount);
+    } catch (error) {
+      // A frame write fails (EPIPE / "write after destroyed") when ffmpeg has
+      // already exited. That message says nothing about WHY; ffmpeg's stderr
+      // does, so wait for the exit and report it instead.
+      if (encoder.exitCode !== null || encoder.stdin.destroyed) {
+        await Promise.race([encoderClosed, new Promise((r) => setTimeout(r, 2000))]);
+        const detail = encoderStderr.trim();
+        if (detail) throw new Error(`ffmpeg MP4 encode failed: ${detail}`);
+      }
+      throw error;
+    }
 
     encoder.stdin.end();
     const code = await encoderClosed;
