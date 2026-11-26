@@ -8,6 +8,24 @@
 
 ---
 
+## Screenshots
+
+**Studio editor**: design templates on a canvas, with starter designs, layers, text, shapes, uploads and video.
+
+![Canolite Studio editor](docs/screenshots/editor.webp)
+
+<table>
+  <tr>
+    <td width="50%"><strong>Templates</strong>: every design in one place<br><img src="docs/screenshots/dashboard-templates.webp" alt="Templates dashboard"></td>
+    <td width="50%"><strong>Playground</strong>: fill in fields, render, and copy the matching API request<br><img src="docs/screenshots/playground.webp" alt="Playground with a generated image"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><strong>Renders</strong>: history of every render, with status and how long it took<br><img src="docs/screenshots/renders.webp" alt="Render history"></td>
+  </tr>
+</table>
+
+---
+
 ## Features
 
 - 🎨 **[Studio editor](docs/studio-editor.md)** — a canvas-first Fabric.js workspace with six editable starter designs, a searchable template library, contextual formatting, layers, snapping guides, Google/custom fonts and video layers. Open a template from the Templates dashboard; the rest of the app is unchanged. See the [release and deployment checklist](docs/editor-release.md).

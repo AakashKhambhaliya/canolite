@@ -4,6 +4,61 @@ Notable changes per release. The version headings are what CI reads when it
 publishes a GitHub Release, so the text under a heading becomes the release
 notes for that tag.
 
+## v1.14.0
+
+A security and reliability release. Upgrading is recommended for every
+install; no manual steps are needed.
+
+**Security fixes.**
+
+- An uploaded SVG named with a capital extension (`.SVG`) is now served with
+  the same script-blocking protection as any other SVG.
+- Sign-in attempts are counted the moment they arrive, so a burst of
+  simultaneous guesses can no longer get past the 10-per-15-minutes limit.
+  The first-run setup token is rate-limited the same way.
+- Dashboard actions only accept requests from the dashboard itself, so another
+  site (even one on a sibling subdomain) can't trigger them with your login.
+- Remote video and image URLs used in renders are checked as strictly as
+  uploads, so an oversized or disguised file is rejected before rendering.
+- API keys are now stored with a fast SHA-256 hash. Existing keys keep working
+  and are converted automatically the first time they are used.
+- Request bodies on sign-in, settings and template routes are size-limited.
+
+**Reliability fixes.**
+
+- A database restart or dropped connection no longer crashes the app.
+- A burst of render requests now waits for a free slot instead of failing.
+  Renders left waiting when the server restarts are marked failed rather than
+  blocking new renders forever.
+- Re-running `install.sh` to update keeps the settings you added to `.env`,
+  such as `MEDIA_ACCESS=private`.
+- Several replicas starting together no longer race on migrations or seeding.
+
+**Video.**
+
+- MP4 export through the full (Chromium) renderer works again. It had been
+  failing for every template the fast renderer can't handle.
+- Clips with short or looping audio no longer cut the video short.
+- Fixed failures with empty trim ranges, odd-sized "fit: contain" layers,
+  mirrored layers, and two layers sharing an id.
+
+**Dashboard and editor.**
+
+- Bulk CSV no longer crashes on blank or repeated column headers, supports
+  drag-and-drop, and sends video fields correctly. So do the Playground and
+  the API docs examples.
+- Font overrides now accept any Google Font and your uploaded fonts.
+- Settings no longer discards unsaved edits when the page refreshes its data.
+
+**Behaviour changes.**
+
+- Video timelines longer than `VIDEO_MAX_OUTPUT_SEC` (default 120 s) are
+  refused, and playback speed is limited to 0.0625×–16×.
+- The retention period must be a whole number of hours.
+- If a render request leaves out `format` and the default is MP4, it now
+  becomes a video render (or a clear error on `/v1/images`) instead of an
+  image mislabelled as MP4.
+
 ## v1.13.0
 
 **Image size in the editor.** Image and video layers have Width and Height
