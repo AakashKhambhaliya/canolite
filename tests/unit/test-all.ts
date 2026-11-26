@@ -100,7 +100,7 @@ const testDesign = {
       type: "textbox",
       left: 60, top: 1100, width: 960,
       fontSize: 24, fontFamily: "Arial",
-      fill: "#94a3b8", text: "+91 98765 43210",
+      fill: "#94a3b8", text: "+91 00000 00000",
       textAlign: "center",
       name: "phone", dynamic: true,
     },
