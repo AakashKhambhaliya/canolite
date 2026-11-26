@@ -513,6 +513,13 @@ export class VideoPreview {
       this.ready = false;
     }
 
+    // Already playing this same timeline: nothing to start. Calling tick()
+    // again would spawn a second requestAnimationFrame loop alongside the
+    // running one.
+    if (this.playing && this.raf !== null) return;
+    if (this.raf !== null) cancelAnimationFrame(this.raf);
+    this.raf = null;
+
     this.playing = true;
     // Re-base the clock on wherever the timeline currently sits. On a fresh
     // start that is `timelineStart`; on a resume it is the paused position,
@@ -671,6 +678,9 @@ export class VideoPreview {
     if (!attempt || typeof attempt.catch !== "function") return;
     attempt.catch((err: any) => {
       if (this.disposed || err?.name !== "NotAllowedError" || layer.el.muted) return;
+      // The rejection can land after pause()/stop() or a rebuild of the
+      // layers; resuming it then would restart playback nobody asked for.
+      if (!this.playing || !this.layers.includes(layer)) return;
       layer.el.muted = true;
       layer.el.play().catch(() => undefined);
       if (!this.audioBlockedReported) {

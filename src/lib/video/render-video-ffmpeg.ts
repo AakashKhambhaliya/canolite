@@ -170,7 +170,7 @@ export async function renderVideoWithFfmpeg(ctx: PreparedVideoRender): Promise<R
     // Invisible or dead layers never appear in either renderer.
     if (obj.visible === false || !enableWindowSec(layer, timeline.durationSec)) continue;
 
-    const safeId = sanitizeLayerId(layer.layerId);
+    const safeId = sanitizeLayerId(layer.layerPath ?? layer.layerId);
     const sourcePath = await resolveVideoSource(layer.videoSrc, ctx.tmpDir, safeId);
 
     let hasAudioStream = false;

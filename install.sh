@@ -21,6 +21,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/AakashKhambhaliya/canolite.git"
 INSTALL_DIR="${CANOLITE_DIR:-$HOME/canolite}"
+PORT_GIVEN="${PORT:-}"
 PORT="${PORT:-3000}"
 
 green() { printf '\033[0;32m%s\033[0m\n' "$1"; }
@@ -83,6 +84,20 @@ else
 fi
 cd "$INSTALL_DIR"
 
+# Read one KEY's value from an existing .env (last occurrence wins).
+env_get() {
+  if [ -f .env ]; then sed -n "s/^$1=//p" .env | tr -d '\r' | tail -n 1; fi
+}
+
+# Re-running this script is the documented update path, so values from a
+# previous run are kept unless overridden on the command line.
+if [ -z "$PORT_GIVEN" ] && [ -n "$(env_get PORT)" ]; then
+  PORT="$(env_get PORT)"
+fi
+if [ -z "${APP_URL:-}" ] && [ -z "${DOMAIN:-}" ] && [ -n "$(env_get APP_URL)" ]; then
+  APP_URL="$(env_get APP_URL)"
+fi
+
 # --- public URL ---
 if [ -z "${APP_URL:-}" ]; then
   if [ -n "${DOMAIN:-}" ]; then
@@ -97,22 +112,36 @@ fi
 # The first-run setup wizard asks for this so nobody else can claim a freshly
 # started, publicly reachable instance. Keep the one from a previous run.
 SETUP_TOKEN="${CANOLITE_SETUP_TOKEN:-}"
-if [ -z "$SETUP_TOKEN" ] && [ -f .env ]; then
-  SETUP_TOKEN="$(sed -n 's/^CANOLITE_SETUP_TOKEN=//p' .env | tail -n 1)"
+if [ -z "$SETUP_TOKEN" ]; then
+  SETUP_TOKEN="$(env_get CANOLITE_SETUP_TOKEN)"
 fi
 if [ -z "$SETUP_TOKEN" ]; then
   SETUP_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 fi
 
 # --- env for compose ---
-{
-  echo "APP_URL=${APP_URL}"
-  echo "PORT=${PORT}"
-  [ -n "${ADMIN_EMAIL:-}" ]    && echo "ADMIN_EMAIL=${ADMIN_EMAIL}"
-  [ -n "${ADMIN_PASSWORD:-}" ] && echo "ADMIN_PASSWORD=${ADMIN_PASSWORD}"
-  echo "CANOLITE_SETUP_TOKEN=${SETUP_TOKEN}"
-} > .env
-chmod 600 .env
+# Only the keys this script manages are rewritten. Everything else an operator
+# put in .env (MEDIA_ACCESS=private, DATABASE_URL, ...) is carried over —
+# truncating the file on update silently reverted private media to public.
+# The new file is created under umask 077 (never world-readable, even
+# briefly) and moved into place in one step.
+MANAGED_KEYS="APP_URL|PORT|CANOLITE_SETUP_TOKEN"
+if [ -n "${ADMIN_EMAIL:-}" ]; then MANAGED_KEYS="${MANAGED_KEYS}|ADMIN_EMAIL"; fi
+if [ -n "${ADMIN_PASSWORD:-}" ]; then MANAGED_KEYS="${MANAGED_KEYS}|ADMIN_PASSWORD"; fi
+ENV_TMP="$(umask 077 && mktemp .env.XXXXXX)"
+(
+  umask 077
+  {
+    echo "APP_URL=${APP_URL}"
+    echo "PORT=${PORT}"
+    if [ -n "${ADMIN_EMAIL:-}" ]; then echo "ADMIN_EMAIL=${ADMIN_EMAIL}"; fi
+    if [ -n "${ADMIN_PASSWORD:-}" ]; then echo "ADMIN_PASSWORD=${ADMIN_PASSWORD}"; fi
+    echo "CANOLITE_SETUP_TOKEN=${SETUP_TOKEN}"
+    if [ -f .env ]; then grep -v -E "^(${MANAGED_KEYS})=" .env || true; fi
+  } > "$ENV_TMP"
+)
+chmod 600 "$ENV_TMP"
+mv -f "$ENV_TMP" .env
 green "→ Wrote .env (APP_URL=${APP_URL})"
 
 # --- run ---

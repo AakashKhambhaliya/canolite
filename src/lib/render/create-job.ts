@@ -12,7 +12,8 @@ import { templates, renderJobs, projects } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { generateId } from "@/lib/utils";
 import { applyModifications, type Modification } from "./apply-modifications";
-import { isUrlSafe } from "@/lib/ssrf";
+import { availableFontsForProject } from "./prepare-design";
+import { createUrlSafetyChecker, TooManyHostsError, type UrlSafetyChecker } from "@/lib/ssrf";
 import { config } from "@/lib/config";
 import {
   crfToVideoQuality,
@@ -117,6 +118,46 @@ async function fetchGlobalDefaults(projectId: string): Promise<GlobalDefaults> {
   return project || {};
 }
 
+/**
+ * The output format a render request will ACTUALLY use, once the template's
+ * and project's defaults are applied. Routes branch image-vs-video on this:
+ * branching on the raw request field sent an omitted `format` down the image
+ * path even when the defaults said "mp4", producing a PNG labelled mp4.
+ * Returns null when the template doesn't exist.
+ */
+export async function effectiveFormat(
+  projectId: string,
+  templateId: string,
+  requested?: string | null
+): Promise<string | null> {
+  const template = await findTemplate(projectId, templateId);
+  if (!template) return null;
+  if (requested) return requested;
+  const globalDefaults = await fetchGlobalDefaults(projectId);
+  return resolveOutput(template, {}, globalDefaults).format;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Reject malformed batch items up front (400) rather than crashing (500). */
+function assertBatchItems(items: unknown): asserts items is { modifications?: Modification[]; webhook_url?: string | null }[] {
+  if (!Array.isArray(items)) throw new RenderAdmissionError("items must be an array", 400);
+  items.forEach((item, i) => {
+    if (!isPlainObject(item)) throw new RenderAdmissionError(`items[${i}] must be an object`, 400);
+    if (item.webhook_url != null && typeof item.webhook_url !== "string") {
+      throw new RenderAdmissionError(`items[${i}].webhook_url must be a string`, 400);
+    }
+  });
+}
+
+/** Check many items' URLs with one shared, bounded checker. */
+async function sanitizeItems<T extends { modifications?: Modification[] }>(items: T[]) {
+  const check = createUrlSafetyChecker();
+  return Promise.all(items.map((item) => sanitizeModifications(item.modifications || [], check)));
+}
+
 export async function findTemplate(projectId: string, templateId: string) {
   const [template] = await db
     .select()
@@ -137,30 +178,53 @@ export async function findTemplate(projectId: string, templateId: string) {
  * collect warnings for the caller.
  */
 export async function sanitizeModifications(
-  mods: Modification[]
+  mods: Modification[],
+  check: UrlSafetyChecker = createUrlSafetyChecker()
 ): Promise<{ mods: Modification[]; warnings: string[] }> {
   if (!Array.isArray(mods) || mods.length > 256) throw new RenderAdmissionError("Maximum 256 modifications per render", 400);
-  const warnings: string[] = [];
-  const out: Modification[] = [];
-  for (const m of mods) {
-    let cleaned = { ...m };
-    if (m.image_url && !(await isUrlSafe(m.image_url))) {
-      warnings.push(
-        `Blocked image_url for "${m.name}" — only public http(s) URLs are allowed`
-      );
-      const { image_url, ...rest } = cleaned;
-      cleaned = rest;
+  // Dashboard routes don't run the v1 Zod schema, so entries can be anything:
+  // a null entry used to crash this loop with a 500.
+  mods.forEach((m, i) => {
+    if (!isPlainObject(m)) throw new RenderAdmissionError(`modifications[${i}] must be an object`, 400);
+    for (const key of ["image_url", "video_url"] as const) {
+      if (m[key] != null && typeof m[key] !== "string") {
+        throw new RenderAdmissionError(`modifications[${i}].${key} must be a string`, 400);
+      }
     }
-    if (m.video_url && !(await isUrlSafe(m.video_url))) {
-      warnings.push(
-        `Blocked video_url for "${m.name}" — only public http(s) URLs are allowed`
-      );
-      const { video_url, ...rest } = cleaned;
-      cleaned = rest;
-    }
-    out.push(cleaned);
+  });
+  try {
+    // All URLs are checked concurrently (the checker bounds concurrency and
+    // dedupes hosts); results are applied in order.
+    const verdicts = await Promise.all(
+      mods.map(async (m) => ({
+        image: m.image_url ? await check(m.image_url) : true,
+        video: m.video_url ? await check(m.video_url) : true,
+      }))
+    );
+    const warnings: string[] = [];
+    const out: Modification[] = mods.map((m, i) => {
+      let cleaned = { ...m };
+      if (!verdicts[i].image) {
+        warnings.push(
+          `Blocked image_url for "${m.name}" — only public http(s) URLs are allowed`
+        );
+        const { image_url, ...rest } = cleaned;
+        cleaned = rest;
+      }
+      if (!verdicts[i].video) {
+        warnings.push(
+          `Blocked video_url for "${m.name}" — only public http(s) URLs are allowed`
+        );
+        const { video_url, ...rest } = cleaned;
+        cleaned = rest;
+      }
+      return cleaned;
+    });
+    return { mods: out, warnings };
+  } catch (error) {
+    if (error instanceof TooManyHostsError) throw new RenderAdmissionError(error.message, 400);
+    throw error;
   }
-  return { mods: out, warnings };
 }
 
 export interface CreatedRender {
@@ -185,12 +249,16 @@ export async function createRenderJob(params: {
 
   const globalDefaults = await fetchGlobalDefaults(params.projectId);
   const resolved = resolveOutput(template, params.output, globalDefaults);
+  if (resolved.format === "mp4") {
+    throw new RenderAdmissionError("MP4 output is a video render; submit it as a video job", 400);
+  }
   const { mods, warnings: ssrfWarnings } = await sanitizeModifications(
     params.modifications || []
   );
   const { warnings: modWarnings } = applyModifications(
     template.designJson,
-    mods
+    mods,
+    await availableFontsForProject(params.projectId)
   );
 
   const [job] = await insertJobs(params.projectId, [{
@@ -228,14 +296,19 @@ export async function createBatchJobs(params: {
   const template = await findTemplate(params.projectId, params.templateId);
   if (!template) return null;
 
+  assertBatchItems(params.items);
   const globalDefaults = await fetchGlobalDefaults(params.projectId);
   const resolved = resolveOutput(template, params.output, globalDefaults);
+  if (resolved.format === "mp4") {
+    throw new RenderAdmissionError("MP4 output is a video render; submit it as a video batch", 400);
+  }
   const batchUid = generateId("batch");
   const uids: string[] = [];
 
+  const sanitized = await sanitizeItems(params.items);
   const rows = [];
-  for (const item of params.items) {
-    const { mods } = await sanitizeModifications(item.modifications || []);
+  for (const [index, item] of params.items.entries()) {
+    const { mods } = sanitized[index];
     const uid = generateId("img");
     uids.push(uid);
     rows.push({
@@ -289,10 +362,11 @@ export async function createVideoRenderJob(params: {
 }): Promise<CreatedRender | null> {
   const template = await findTemplate(params.projectId, params.templateId);
   if (!template) return null;
-  if (!template.hasVideo) throw new Error("Template does not contain video layers");
+  // A caller mistake, not a server fault: 400, not 500.
+  if (!template.hasVideo) throw new RenderAdmissionError("Template does not contain video layers", 400);
 
   const { mods, warnings: ssrfWarnings } = await sanitizeModifications(params.modifications || []);
-  const { warnings: modWarnings } = applyModifications(template.designJson, mods);
+  const { warnings: modWarnings } = applyModifications(template.designJson, mods, await availableFontsForProject(params.projectId));
   const globalDefaults = await fetchGlobalDefaults(params.projectId);
   const video = cappedVideoFields(
     resolveVideoOutput(template, params.output, globalDefaults)
@@ -331,7 +405,8 @@ export async function createVideoBatchJobs(params: {
 }): Promise<CreatedBatch | null> {
   const template = await findTemplate(params.projectId, params.templateId);
   if (!template) return null;
-  if (!template.hasVideo) throw new Error("Template does not contain video layers");
+  if (!template.hasVideo) throw new RenderAdmissionError("Template does not contain video layers", 400);
+  assertBatchItems(params.items);
   const batchUid = generateId("vbatch");
   const uids: string[] = [];
   const rows = [];
@@ -339,8 +414,9 @@ export async function createVideoBatchJobs(params: {
   const video = cappedVideoFields(
     resolveVideoOutput(template, params.output, globalDefaults)
   );
-  for (const item of params.items) {
-    const { mods } = await sanitizeModifications(item.modifications || []);
+  const sanitized = await sanitizeItems(params.items);
+  for (const [index, item] of params.items.entries()) {
+    const { mods } = sanitized[index];
     const uid = generateId("vid");
     uids.push(uid);
     rows.push({

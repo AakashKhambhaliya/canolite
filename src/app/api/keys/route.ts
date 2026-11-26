@@ -4,6 +4,7 @@ import { apiKeys } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { generateApiKey } from "@/lib/api-keys";
+import { bodyErrorResponse, readJsonBodyOrNull, SMALL_JSON_LIMIT } from "@/lib/json-body";
 
 export async function GET() {
   try {
@@ -42,9 +43,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const { name } = await request.json();
+    const body = await readJsonBodyOrNull<{ name?: unknown }>(request, SMALL_JSON_LIMIT);
+    const name = body?.name;
 
-    if (!name?.trim()) {
+    if (typeof name !== "string" || !name.trim()) {
       return NextResponse.json(
         { error: "Key name is required" },
         { status: 400 }
@@ -62,6 +64,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ fullKey, prefix }, { status: 201 });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     console.error("Error creating key:", error);
     return NextResponse.json(
       { error: "Internal server error" },

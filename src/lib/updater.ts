@@ -90,16 +90,54 @@ export function isUpdateInFlight(): boolean {
   return true;
 }
 
-/** Run a shell command without blocking the event loop (so health checks stay
- *  green while we build). Rejects with stderr on a non-zero exit. */
-function sh(cmd: string, timeoutMs = 10 * 60_000): Promise<string> {
+const updateClaim = globalThis as typeof globalThis & { __canoliteUpdateClaimed?: boolean };
+
+/**
+ * Synchronously claim the right to start an update in this process. The
+ * route's work before an update's status file is written (the pre-update
+ * backup) takes a while, and two requests checking isUpdateInFlight() in that
+ * window both proceeded: duplicate backups and duplicate Coolify deploys.
+ * Release with releaseUpdateClaim() once the status file reflects the update.
+ */
+export function tryClaimUpdate(): boolean {
+  if (updateClaim.__canoliteUpdateClaimed || isUpdateInFlight()) return false;
+  updateClaim.__canoliteUpdateClaimed = true;
+  return true;
+}
+
+export function releaseUpdateClaim(): void {
+  updateClaim.__canoliteUpdateClaimed = false;
+}
+
+/** Validated before reaching a command line. */
+const SAFE_REF = /^(?!-)[A-Za-z0-9._\/-]{1,200}$/;
+const SAFE_SHA = /^[0-9a-f]{7,64}$/i;
+
+/**
+ * Run a command without blocking the event loop (so health checks stay green
+ * while we build). Rejects with stderr on a non-zero exit.
+ *
+ * Takes an argument vector, not a shell string, so nothing is interpolated by
+ * a shell (Windows still needs one to launch npm/npx .cmd shims; every
+ * argument here is a constant or validated). On POSIX the child leads its own
+ * process group, so a timeout kills the whole tree — killing only the direct
+ * child used to leave git/npm grandchildren running.
+ */
+function sh(cmd: string, args: string[] = [], timeoutMs = 10 * 60_000): Promise<string> {
+  const isWindows = process.platform === "win32";
+  const label = [cmd, ...args].join(" ");
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, { cwd: ROOT, shell: true });
+    const child = spawn(cmd, args, { cwd: ROOT, shell: isWindows, detached: !isWindows });
     let out = "";
     let err = "";
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s: ${cmd}`));
+      try {
+        if (!isWindows && child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      reject(new Error(`Timed out after ${Math.round(timeoutMs / 1000)}s: ${label}`));
     }, timeoutMs);
     child.stdout?.on("data", (d) => (out += d.toString()));
     child.stderr?.on("data", (d) => (err += d.toString()));
@@ -220,6 +258,11 @@ export async function startCoolifyUpdate(): Promise<{
   status?: number;
   error?: string;
 }> {
+  // Re-check here too: the route's earlier check happened before a slow
+  // backup, and a deploy must never be queued twice.
+  if (isUpdateInFlight()) {
+    return { success: false, error: "An update is already in progress." };
+  }
   writeStatus({
     phase: "restarting",
     message: "Requesting redeploy from Coolify…",
@@ -252,26 +295,27 @@ export async function startCoolifyUpdate(): Promise<{
 
 async function runUpdate(): Promise<void> {
   try {
-    const branch = (await sh("git rev-parse --abbrev-ref HEAD")) || "main";
-    const fromCommit = await sh("git rev-parse HEAD");
+    const branch = (await sh("git", ["rev-parse", "--abbrev-ref", "HEAD"])) || "main";
+    if (!SAFE_REF.test(branch)) throw new Error(`Refusing to update: unexpected branch name "${branch.slice(0, 80)}"`);
+    const fromCommit = await sh("git", ["rev-parse", "HEAD"]);
+    if (!SAFE_SHA.test(fromCommit)) throw new Error("Refusing to update: could not read the current commit");
     writeStatus({ fromCommit });
 
     // Discard stray local changes so --ff-only can't be blocked by a dirty tree.
-    await sh("git stash --quiet || true").catch(() => {});
-    await sh("git fetch origin --quiet");
-    await sh(`git pull origin ${branch} --ff-only`);
+    await sh("git", ["stash", "--quiet"]).catch(() => {});
+    await sh("git", ["fetch", "origin", "--quiet"]);
+    await sh("git", ["pull", "origin", branch, "--ff-only"]);
 
-    const toCommit = await sh("git rev-parse HEAD");
+    const toCommit = await sh("git", ["rev-parse", "HEAD"]);
+    if (!SAFE_SHA.test(toCommit)) throw new Error("Could not read the updated commit");
     writeStatus({ toCommit });
 
     // Reinstall deps only when the manifest changed — and DO NOT pass
     // --production: building needs the dev toolchain (next/typescript/tailwind).
-    const changed = await sh(
-      `git diff ${fromCommit} ${toCommit} --name-only`
-    ).catch(() => "");
+    const changed = await sh("git", ["diff", fromCommit, toCommit, "--name-only"]).catch(() => "");
     if (/package(-lock)?\.json/.test(changed)) {
       writeStatus({ phase: "installing", message: "Installing dependencies…" });
-      await sh("npm install --no-audit --no-fund");
+      await sh("npm", ["install", "--no-audit", "--no-fund"]);
 
       // Playwright pins each library version to a specific browser build, so a
       // version bump leaves the previously downloaded Chromium unusable:
@@ -282,7 +326,7 @@ async function runUpdate(): Promise<void> {
       // already present from the initial install. Non-fatal — a failure here
       // shouldn't roll back an otherwise good update.
       writeStatus({ message: "Updating the headless browser…" });
-      await sh("npx playwright install chromium", 15 * 60_000).catch((e) => {
+      await sh("npx", ["playwright", "install", "chromium"], 15 * 60_000).catch((e) => {
         console.warn(
           "[update] playwright install failed — rendering may need " +
             "`npx playwright install chromium` run manually:",
@@ -294,7 +338,7 @@ async function runUpdate(): Promise<void> {
     // Rebuild so `next start` serves the new code. Without this the running
     // server keeps serving the stale .next build.
     writeStatus({ phase: "building", message: "Building the new version…" });
-    await sh("npm run build");
+    await sh("npm", ["run", "build"]);
 
     writeStatus({
       phase: "restarting",

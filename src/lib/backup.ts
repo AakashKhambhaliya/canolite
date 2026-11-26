@@ -24,6 +24,7 @@ const BACKUP_ROOT =
     ? "/app/data/backups"
     : path.join(process.cwd(), ".backups"));
 const MAX_BACKUPS = 5;
+const PG_DUMP_TIMEOUT_MS = Number(process.env.PG_DUMP_TIMEOUT_MS) || 10 * 60 * 1000;
 
 function getAppVersion(): string {
   try {
@@ -94,16 +95,36 @@ async function pgDumpIfAvailable(
   });
   if (!available) return false;
 
+  // Keep the password out of argv (visible to every local user via `ps` and
+  // /proc/<pid>/cmdline): strip it from the URL and hand it over in PGPASSWORD,
+  // which libpq reads when the connection string carries none.
+  const dumpUrl = new URL(databaseTransport(databaseUrl).libpqUrl);
+  const password = decodeURIComponent(dumpUrl.password);
+  dumpUrl.password = "";
+  const env = { ...process.env };
+  if (password) env.PGPASSWORD = password;
+
   await new Promise<void>((resolve, reject) => {
     const child = spawn(
       "pg_dump",
-      ["--dbname", databaseTransport(databaseUrl).libpqUrl, "--format=custom", "--file", outFile],
-      { stdio: ["ignore", "pipe", "pipe"] }
+      ["--dbname", dumpUrl.toString(), "--format=custom", "--file", outFile],
+      { stdio: ["ignore", "ignore", "pipe"], env }
     );
+    // A hung database must not stall boot (ensureDb awaits this) forever.
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`pg_dump timed out after ${PG_DUMP_TIMEOUT_MS / 1000}s`));
+    }, PG_DUMP_TIMEOUT_MS);
     let err = "";
-    child.stderr?.on("data", (d) => (err += d.toString()));
-    child.on("error", reject);
+    child.stderr?.on("data", (d) => {
+      if (err.length < 16_384) err += d.toString();
+    });
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
     child.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error((err || `pg_dump exited ${code}`).trim()));
     });

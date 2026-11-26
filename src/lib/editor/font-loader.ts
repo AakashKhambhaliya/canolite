@@ -38,10 +38,6 @@ const SYSTEM_FONT_SET = new Set(SYSTEM_FONTS);
 const loaded = new Set<string>();
 const inflight = new Map<string, Promise<void>>();
 
-export function isGoogleFont(family: string): boolean {
-  return GOOGLE_FAMILY_SET.has(family);
-}
-
 function familyToParam(family: string): string {
   return family.replace(/ /g, "+");
 }

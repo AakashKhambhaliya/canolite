@@ -7,6 +7,7 @@ import { config } from "@/lib/config";
 import { fetchPublic } from "@/lib/ssrf";
 import { storageFilePath } from "@/lib/storage";
 import { runFfmpeg } from "./ffmpeg";
+import { probeVideo } from "./probe";
 import type { VideoLayer } from "./timeline";
 
 const MAX_REMOTE_VIDEO_BYTES = config.MAX_VIDEO_UPLOAD_MB * 1024 * 1024;
@@ -30,11 +31,46 @@ export function storageKeyFromUrl(url: string): string | null {
   return match ? match[1] : null;
 }
 
+/**
+ * Total remote-video bytes one render may download across ALL its layers. The
+ * per-download cap alone allowed 32 layers x 100 MB in a single render.
+ */
+const MAX_REMOTE_VIDEO_BYTES_PER_RENDER = MAX_REMOTE_VIDEO_BYTES * 3;
+
+/** Bytes downloaded so far, keyed by the render's lease signal (GC'd with it). */
+const remoteBytesByRender = new WeakMap<AbortSignal, number>();
+
 async function downloadRemoteVideo(url: string, outPath: string): Promise<void> {
-  const res = await fetchPublic(url, {signal: renderSignal(), maxBytes: MAX_REMOTE_VIDEO_BYTES, timeoutMs: FETCH_TIMEOUT_MS,
+  const signal = renderSignal();
+  const used = signal ? remoteBytesByRender.get(signal) ?? 0 : 0;
+  const remaining = MAX_REMOTE_VIDEO_BYTES_PER_RENDER - used;
+  if (remaining <= 0) throw new Error("Remote videos in this render exceed the total download limit");
+  const res = await fetchPublic(url, {signal, maxBytes: Math.min(MAX_REMOTE_VIDEO_BYTES, remaining), timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "User-Agent": "CanoliteRenderer/1.0", Accept: "video/*,*/*;q=0.8" } });
+  if (signal) remoteBytesByRender.set(signal, used + res.bytes.length);
   if (!res.ok) throw new Error(`Remote video returned HTTP ${res.status}`);
-  await fs.writeFile(outPath, res.bytes, {signal: renderSignal()});
+  await fs.writeFile(outPath, res.bytes, {signal});
+  await assertRemoteVideoAcceptable(outPath);
+}
+
+/**
+ * Hold a downloaded file to the same rules an upload gets in /api/upload:
+ * it must be a real video in an allowed container (ffprobe's format whitelist
+ * rejects anything else) and within MAX_VIDEO_PIXELS. Without this a tiny
+ * "pixel bomb" header could make the decoder allocate gigabytes before any
+ * scale filter ran.
+ */
+async function assertRemoteVideoAcceptable(filePath: string): Promise<void> {
+  let probe: Awaited<ReturnType<typeof probeVideo>>;
+  try {
+    probe = await probeVideo(filePath);
+  } catch (error) {
+    throw new Error(`Remote video could not be inspected: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (probe.width <= 0 || probe.height <= 0) throw new Error("Remote video metadata is invalid or incomplete");
+  if (probe.width * probe.height > config.MAX_VIDEO_PIXELS) {
+    throw new Error(`Remote video resolution too large. Maximum is ${config.MAX_VIDEO_PIXELS} pixels.`);
+  }
 }
 
 export async function resolveVideoSource(videoSrc: string, tmpDir: string, layerId: string): Promise<string> {
@@ -70,7 +106,9 @@ export function buildFrameDecodeArgs(params: {
   if (fit === "stretch") {
     vf = `fps=${fps},scale=${w}:${h}`;
   } else if (fit === "contain") {
-    vf = `fps=${fps},scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`;
+    // format=rgba before pad: see fitFilterExpr in filtergraph.ts (odd boxes
+    // on 4:2:0 input). Contain frames are written as PNG, so RGB is native.
+    vf = `fps=${fps},format=rgba,scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`;
   } else {
     vf = `fps=${fps},scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`;
   }
@@ -127,7 +165,7 @@ export async function decodeLayerFrames(params: {
   outputScale: number;
 }): Promise<DecodedLayer> {
   const { layer, fps, tmpDir, storageTmpKey, outputScale } = params;
-  const safeId = sanitizeLayerId(layer.layerId);
+  const safeId = sanitizeLayerId(layer.layerPath ?? layer.layerId);
   const sourcePath = await resolveVideoSource(layer.videoSrc, tmpDir, safeId);
   const framesDir = path.join(tmpDir, safeId);
   await fs.mkdir(framesDir, { recursive: true });

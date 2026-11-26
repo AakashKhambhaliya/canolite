@@ -14,7 +14,6 @@ import {
   Settings,
   LogOut,
   ChevronLeft,
-  User,
   Menu,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";

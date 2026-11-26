@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { authenticateApiKey } from "@/lib/api-auth";
 import { withCors, handleOptions } from "@/lib/cors";
 import { renderRequestSchema } from "@/lib/validation";
-import { createRenderJob } from "@/lib/render/create-job";
+import { createRenderJob, effectiveFormat } from "@/lib/render/create-job";
 import { processRenderJob } from "@/lib/render/process-job";
 import { absoluteForRequest } from "@/lib/storage";
 import { isUrlSafe } from "@/lib/ssrf";
@@ -46,7 +46,12 @@ export async function POST(request: Request) {
       synchronous,
     } = parsed.data;
 
-    if (format === "mp4") {
+    // Also catches an omitted format whose template/project default is mp4.
+    const resolvedFormat = await effectiveFormat(auth.projectId, template_id, format);
+    if (!resolvedFormat) {
+      return withCors(NextResponse.json({ error: "Template not found" }, { status: 404 }));
+    }
+    if (resolvedFormat === "mp4") {
       return withCors(
         NextResponse.json(
           { error: "MP4 renders are asynchronous video jobs. Use POST /v1/videos." },

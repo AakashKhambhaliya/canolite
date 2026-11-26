@@ -100,7 +100,14 @@ export async function POST(request: Request) {
     const base = (file.name || "file").split(/[/\\]/).pop() || "file";
     let safeName = base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
     if (!safeName || safeName === "." || safeName === "..") safeName = `file.${ext}`;
-    if (!safeName.toLowerCase().endsWith(`.${ext}`)) safeName = `${safeName}.${ext}`;
+    // Always store the extension lowercase. Security headers keyed on the
+    // extension (the SVG-only script-blocking CSP in particular) match the
+    // lowercase form, so "evil.SVG" must never be stored as-is.
+    if (safeName.toLowerCase().endsWith(`.${ext}`)) {
+      safeName = `${safeName.slice(0, -(ext.length + 1))}.${ext}`;
+    } else {
+      safeName = `${safeName}.${ext}`;
+    }
     const key = `uploads/${user.projectId}/${generateId()}/${safeName}`;
 
     let videoProbe: VideoProbeResult | null = null;

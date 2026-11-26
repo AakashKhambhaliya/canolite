@@ -48,6 +48,11 @@ export function thumbnailScale(width: number, height: number): number {
 // letting the stale render win. Mirrors the in-flight promise caching in
 // getBrowser() (render-image.ts) and ensureFont() (editor/font-loader.ts).
 const inflight = new Map<string, Promise<void>>();
+// Templates asked for again while their render was in flight. The in-flight
+// render may already be past reading the row, so the joining call is
+// honoured with one more pass once it finishes — otherwise a save landing
+// between the row UPDATE and the cleanup was silently dropped.
+const rerunRequested = new Set<string>();
 
 /** Maximum re-render attempts when the template keeps changing mid-render. */
 const MAX_RENDER_ATTEMPTS = 3;
@@ -98,7 +103,10 @@ async function cleanupStaleThumbnails(
  */
 export async function generateThumbnail(templateRowId: string): Promise<void> {
   const existing = inflight.get(templateRowId);
-  if (existing) return existing;
+  if (existing) {
+    rerunRequested.add(templateRowId);
+    return existing;
+  }
 
   const p = withRenderSlot(async () => {
     for (let attempt = 1; attempt <= MAX_RENDER_ATTEMPTS; attempt++) {
@@ -185,6 +193,7 @@ export async function generateThumbnail(templateRowId: string): Promise<void> {
     })
     .finally(() => {
       inflight.delete(templateRowId);
+      if (rerunRequested.delete(templateRowId)) void generateThumbnail(templateRowId);
     });
 
   inflight.set(templateRowId, p);

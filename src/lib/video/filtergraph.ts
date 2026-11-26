@@ -112,7 +112,10 @@ export function layerBoxSize(layer: VideoLayer, outputScale: number): { w: numbe
 export function fitFilterExpr(fit: VideoLayer["fit"], w: number, h: number): string {
   if (fit === "stretch") return `scale=${w}:${h}`;
   if (fit === "contain") {
-    return `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`;
+    // format=rgba first: on a yuv420p (4:2:0) input, pad rounds its output
+    // size DOWN to even, so an odd box made pad smaller than the scaled input
+    // and filtergraph init failed. RGB has no chroma subsampling.
+    return `format=rgba,scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`;
   }
   return `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`;
 }
@@ -139,6 +142,8 @@ export function overlayPixelPosition(
   return { x: Math.round(x), y: Math.round(y) };
 }
 
+const FFMPEG_INT_MAX = 2147483647;
+
 function layerSpanSec(layer: VideoLayer): number {
   return Math.max(0, layer.trimEnd - layer.trimStart);
 }
@@ -157,9 +162,12 @@ export function enableWindowSec(
   // A layer that starts at/after the end of the timeline is never visible;
   // treating it as dead keeps its source closed.
   if (start >= durationSec) return null;
-  if (layer.loop) return { start, end: Math.max(start, durationSec) };
+  // An empty source span is dead whether or not it loops. Checking loop first
+  // sent a zero-span looping layer into the loop filter, which divided by the
+  // zero span and emitted "loop=loop=Infinity".
   const span = layerSpanSec(layer);
   if (span <= 0) return null;
+  if (layer.loop) return { start, end: Math.max(start, durationSec) };
   const end = start + span / Math.max(1e-6, layer.playbackRate);
   if (end <= start) return null;
   return { start, end };
@@ -224,10 +232,11 @@ export function buildVideoChainFilters(params: {
     // safe: at input EOF the filter loops whatever it cached.
     const size = loopFilterSize(layerSpanSec(layer), fps);
     const rate = Math.max(1e-6, layer.playbackRate);
-    const repeatsNeeded = Math.max(
-      0,
-      Math.ceil(((window.end - window.start) * rate) / layerSpanSec(layer) - 1e-6) - 1
-    );
+    const rawRepeats = Math.ceil(((window.end - window.start) * rate) / layerSpanSec(layer) - 1e-6) - 1;
+    // Clamp to a finite value within ffmpeg's int range.
+    const repeatsNeeded = Number.isFinite(rawRepeats)
+      ? Math.min(FFMPEG_INT_MAX, Math.max(0, rawRepeats))
+      : 0;
     if (repeatsNeeded > 0) parts.push(`loop=loop=${repeatsNeeded}:size=${size}:start=0`);
   }
   // Timestamp hygiene — applied AFTER the loop filter: `loop` replays its

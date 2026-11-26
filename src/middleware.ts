@@ -14,6 +14,45 @@ const PUBLIC_ROUTES = [
   "/storage/", // Rendered images / uploads — served publicly by design
 ];
 
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Whether a state-changing request was issued by this app's own pages.
+ *
+ * Browsers send Sec-Fetch-Site on every request (modern engines) and Origin on
+ * every POST/PUT/PATCH/DELETE. Sec-Fetch-Site is authoritative when present;
+ * otherwise Origin must name this host (as the client sees it, so a reverse
+ * proxy's X-Forwarded-Host counts, as does APP_URL). A request carrying
+ * neither header is not from a browser, so it can't be a CSRF.
+ */
+function isSameOriginRequest(request: NextRequest): boolean {
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite) return fetchSite === "same-origin" || fetchSite === "none";
+
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host.toLowerCase();
+  } catch {
+    return false;
+  }
+  const allowed = new Set<string>();
+  const add = (value: string | null | undefined) => {
+    const host = value?.split(",")[0].trim().toLowerCase();
+    if (host) allowed.add(host);
+  };
+  add(request.headers.get("x-forwarded-host"));
+  add(request.headers.get("host"));
+  add(request.nextUrl.host);
+  try {
+    if (process.env.APP_URL) add(new URL(process.env.APP_URL).host);
+  } catch {
+    /* ignore a malformed APP_URL */
+  }
+  return allowed.has(originHost);
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -25,6 +64,21 @@ export function middleware(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = `/api${pathname}`;
     return NextResponse.rewrite(url);
+  }
+
+  // CSRF: the dashboard's session cookie is SameSite=Lax, which still rides
+  // along on a "simple" cross-origin POST from a SAME-SITE page (a sibling
+  // subdomain), and request.json() happily parses a text/plain body. So any
+  // state-changing /api call made with the session must come from this
+  // origin. /api/v1 is excluded: it authenticates with an API key header,
+  // never the cookie.
+  if (
+    pathname.startsWith("/api/") &&
+    !pathname.startsWith("/api/v1/") &&
+    !SAFE_METHODS.has(request.method) &&
+    !isSameOriginRequest(request)
+  ) {
+    return NextResponse.json({ error: "Cross-origin request blocked" }, { status: 403 });
   }
 
   // Allow public routes

@@ -29,9 +29,12 @@ export default function LoginPage() {
   useEffect(() => {
     let active = true;
     fetch("/api/auth/setup")
-      .then((r) => r.json())
+      .then(async (r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (active && !d.configured) router.replace("/setup");
+        // Only an explicit "not configured" redirects. A 429/5xx (or a proxy
+        // error page) used to read as "not configured" and bounced a real
+        // admin to the setup wizard.
+        if (active && d && d.configured === false) router.replace("/setup");
       })
       .catch(() => {});
     return () => {

@@ -7,7 +7,8 @@ import {
   startUpdate,
   startCoolifyUpdate,
   isGitCheckout,
-  isUpdateInFlight,
+  tryClaimUpdate,
+  releaseUpdateClaim,
   updateMode,
 } from "@/lib/updater";
 import { persistentDataStatus } from "@/lib/persistence";
@@ -309,7 +310,9 @@ export async function POST() {
   // Pre-flight 2: refuse if an update is already in flight. This has to come
   // before the backup — otherwise every repeat click writes another full copy
   // of the database only to then be told the update is already running.
-  if (isUpdateInFlight()) {
+  // The check and the claim are one synchronous step, so concurrent requests
+  // can't both get past it while the backup below runs.
+  if (!tryClaimUpdate()) {
     return NextResponse.json({
       success: true,
       restarting: true,
@@ -317,7 +320,16 @@ export async function POST() {
       message: "An update is already in progress.",
     });
   }
+  try {
+    return await claimedUpdate(mode);
+  } finally {
+    // By now the status file records the update (or its failure), which is
+    // what blocks later requests.
+    releaseUpdateClaim();
+  }
+}
 
+async function claimedUpdate(mode: ReturnType<typeof updateMode>) {
   // Pre-flight 3: back up the database before changing anything.
   try {
     const { createBackup } = await import("@/lib/backup");

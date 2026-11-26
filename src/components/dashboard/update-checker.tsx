@@ -60,6 +60,24 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
   const [restartStuck, setRestartStuck] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const pollingRef = useRef(false);
+  // Restart polls are setTimeout chains. Without these they outlived the
+  // component (e.g. navigating into the editor, which has no sidebar) and
+  // still fired window.location.reload() on whatever page was open.
+  const mountedRef = useRef(true);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+      pollingRef.current = false;
+    };
+  }, []);
+  const schedulePoll = (fn: () => void, ms: number) => {
+    if (!mountedRef.current) return;
+    pollTimerRef.current = setTimeout(fn, ms);
+  };
 
   const isCoolify = info?.mode === "coolify";
   const canApplyUpdate = info?.mode === "git" || info?.mode === "coolify";
@@ -70,7 +88,11 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
       // A manual check bypasses the server's 12h release cache so a freshly
       // published version shows up right away; the automatic one honours it.
       const res = await fetch(silent ? "/api/update" : "/api/update?force=1");
-      const data = await res.json();
+      // A proxy error page is HTML, not JSON: report the status instead of a
+      // JSON SyntaxError.
+      const data = await res
+        .json()
+        .catch(() => ({ error: `server returned HTTP ${res.status}` }));
       setInfo(data);
       // Only surface errors for manual checks — the automatic check shouldn't
       // spam toasts (e.g. Docker deploys have no .git so it always "fails").
@@ -101,6 +123,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     let sawDown = false;
 
     const tick = async () => {
+      if (!mountedRef.current) return;
       if (Date.now() - startedAt > GIT_RESTART_TIMEOUT) {
         pollingRef.current = false;
         setRestartStuck(true);
@@ -133,6 +156,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
         up = false;
       }
 
+      if (!mountedRef.current) return;
       if (!up) {
         sawDown = true;
       } else if (sawDown) {
@@ -141,7 +165,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
         return;
       }
 
-      setTimeout(tick, 2000);
+      schedulePoll(tick, 2000);
     };
 
     tick();
@@ -160,6 +184,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     const startedAt = Date.now();
 
     const tick = async () => {
+      if (!mountedRef.current) return;
       if (Date.now() - startedAt > COOLIFY_TIMEOUT) {
         pollingRef.current = false;
         setRestartStuck(true);
@@ -172,6 +197,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
           const data = await r.json();
           if (data.commit && preCommit && data.commit !== preCommit) {
             // The new image is live — reload into it.
+            if (!mountedRef.current) return;
             window.location.reload();
             return;
           }
@@ -181,7 +207,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
         // connection error = container swapping — ignore and retry.
       }
 
-      setTimeout(tick, 3000);
+      schedulePoll(tick, 3000);
     };
 
     tick();
@@ -192,7 +218,9 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     setRestartStuck(false);
     try {
       const res = await fetch("/api/update", { method: "POST" });
-      const data = await res.json();
+      const data = await res
+        .json()
+        .catch(() => ({ message: `Update failed (HTTP ${res.status})` }));
 
       if (data.success && data.restarting) {
         // Update is running in the background; wait for the restart.
@@ -230,7 +258,9 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
       }
 
       const res = await fetch("/api/update", { method: "POST" });
-      const data = await res.json();
+      const data = await res
+        .json()
+        .catch(() => ({ message: `Update failed (HTTP ${res.status})` }));
 
       if (data.success && data.restarting) {
         setInstalled(true);
@@ -271,6 +301,46 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
     : PHASE_LABELS[restartPhase] || "Updating…";
 
   const showUpdate = !!(info?.updateAvailable && !installed && canApplyUpdate);
+
+  // Rendered in BOTH the collapsed and expanded layouts: in Coolify mode the
+  // collapsed icon opens it too, and leaving it out of that layout made the
+  // Update button do nothing until the sidebar was expanded.
+  const confirmDialog = (
+    <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Update Canolite?</DialogTitle>
+          <DialogDescription className="space-y-2 pt-1">
+            <span>
+              The app will restart and be briefly unavailable while Coolify
+              rebuilds the image.
+            </span>
+            <span>
+              Downtime typically takes several minutes because the rebuild
+              includes Chromium.
+            </span>
+            <span>
+              Any renders still in flight will be lost.
+            </span>
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <button
+            onClick={() => setConfirmOpen(false)}
+            className="h-8 px-3 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={doCoolifyUpdate}
+            className="h-8 px-3 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition-colors"
+          >
+            Update now
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 
   // --- Collapsed: just an icon with a tooltip ---------------------------------
   if (collapsed) {
@@ -321,6 +391,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
               : `v${info?.currentVersion || "?"} — Up to date`}
           </TooltipContent>
         </Tooltip>
+        {confirmDialog}
       </div>
     );
   }
@@ -475,40 +546,7 @@ export function UpdateChecker({ collapsed }: { collapsed: boolean }) {
       )}
 
       {/* Confirmation dialog for the Coolify path */}
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Update Canolite?</DialogTitle>
-            <DialogDescription className="space-y-2 pt-1">
-              <span>
-                The app will restart and be briefly unavailable while Coolify
-                rebuilds the image.
-              </span>
-              <span>
-                Downtime typically takes several minutes because the rebuild
-                includes Chromium.
-              </span>
-              <span>
-                Any renders still in flight will be lost.
-              </span>
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <button
-              onClick={() => setConfirmOpen(false)}
-              className="h-8 px-3 rounded-md text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={doCoolifyUpdate}
-              className="h-8 px-3 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium transition-colors"
-            >
-              Update now
-            </button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {confirmDialog}
     </div>
   );
 }

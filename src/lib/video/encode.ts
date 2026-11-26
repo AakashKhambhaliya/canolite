@@ -17,6 +17,13 @@ export interface VideoEncodeOptions {
    * way, so no alpha is ever needed.
    */
   frameFormat?: "png" | "jpeg";
+  /**
+   * Timeline length. When set, audio is padded with silence to this length
+   * and the output is cut with -t instead of -shortest, so a clip shorter than
+   * the timeline (or a looping layer, whose audio plays once) can no longer
+   * end the file early and break the frame pipe with EPIPE.
+   */
+  durationSec?: number;
 }
 
 /**
@@ -100,19 +107,27 @@ export function buildEncodeArgs(opts: VideoEncodeOptions): string[] {
   args.push("-framerate", String(opts.fps), "-i", "-");
 
   const audioEntries = [] as Parameters<typeof buildAudioMixFilters>[0];
-  opts.audioLayers.forEach((decoded, idx) => {
-    if (!decoded.audioPath) return;
+  // Input 0 is the frame pipe; audio inputs are numbered by how many have
+  // actually been added, not by position in audioLayers (which may contain
+  // layers without audio).
+  let nextInputIndex = 1;
+  for (const decoded of opts.audioLayers) {
+    if (!decoded.audioPath) continue;
     args.push("-i", decoded.audioPath);
     audioEntries.push({
-      inputIndex: idx + 1,
+      inputIndex: nextInputIndex++,
       startAtSec: decoded.layer.startAt,
       volume: decoded.layer.volume,
     });
-  });
+  }
+  const durationSec =
+    opts.durationSec && Number.isFinite(opts.durationSec) && opts.durationSec > 0
+      ? opts.durationSec
+      : undefined;
 
   if (opts.encoder && isVaapiEncoder(opts.encoder)) args.push(...vaapiDeviceArgs());
 
-  const audio = buildAudioMixFilters(audioEntries);
+  const audio = buildAudioMixFilters(audioEntries, durationSec ? { padToSec: durationSec } : undefined);
   if (audio.filters.length > 0) {
     args.push("-filter_complex", audio.filters.join(";"), "-map", "0:v", "-map", audio.outputLabel);
   } else {
@@ -127,7 +142,11 @@ export function buildEncodeArgs(opts: VideoEncodeOptions): string[] {
   // surfaces and the encoder must not be told to convert them back.
   if (!vaapi) args.push("-pix_fmt", "yuv420p");
   args.push("-movflags", "+faststart");
-  if (audio.filters.length > 0) args.push("-c:a", "aac", "-b:a", "192k", "-shortest");
+  if (audio.filters.length > 0) {
+    args.push("-c:a", "aac", "-b:a", "192k");
+    if (durationSec) args.push("-t", String(durationSec));
+    else args.push("-shortest");
+  }
   args.push("-y", opts.outPath);
   return args;
 }

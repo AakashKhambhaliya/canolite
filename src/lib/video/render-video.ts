@@ -21,7 +21,6 @@ import os from "node:os";
 import path from "node:path";
 import { withRenderSlot } from "@/lib/security/render-budget";
 import { prepareDesignForRender } from "@/lib/render/prepare-design";
-import type { CustomFontRef } from "@/lib/render/render-image";
 import { buildTimeline } from "./timeline";
 import { qualityToCrf, type RenderVideoOptions, type RenderVideoResult, type PreparedVideoRender } from "./types";
 import { resolveVideoEncoder } from "./encode";
@@ -33,14 +32,7 @@ export function renderVideoToBuffer(opts: RenderVideoOptions): Promise<RenderVid
   return withRenderSlot(() => renderVideoInner(opts), "video");
 }
 
-export function renderVideoToBufferPrepared(opts: RenderVideoOptions, customFonts: CustomFontRef[] = []): Promise<RenderVideoResult> {
-  return withRenderSlot(() => renderVideoInner(opts, { designJson: opts.designJson, customFonts }), "video");
-}
-
-async function renderVideoInner(
-  opts: RenderVideoOptions,
-  prepared?: { designJson: any; customFonts: CustomFontRef[] }
-): Promise<RenderVideoResult> {
+async function renderVideoInner(opts: RenderVideoOptions): Promise<RenderVideoResult> {
   const outputScale = Math.max(1, Math.min(4, opts.scale || 1));
   const timeline = buildTimeline(opts.designJson, { fps: opts.fps, durationSec: opts.durationSec });
   if (timeline.layers.length === 0) throw new Error("Template contains no video layers");
@@ -55,7 +47,7 @@ async function renderVideoInner(
     warnings.push(`Output dimensions rounded to even size ${evenWidth}x${evenHeight} for H.264 compatibility`);
   }
 
-  const { designJson: renderJson, customFonts } = prepared ?? (await prepareDesignForRender(opts.designJson, opts.projectId));
+  const { designJson: renderJson, customFonts } = await prepareDesignForRender(opts.designJson, opts.projectId);
 
   // Decide the renderer ONCE, before any work: simple templates (axis-aligned,
   // constant-opacity video layers at root level, loop caches within budget)

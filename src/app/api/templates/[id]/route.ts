@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isUuid } from "@/lib/utils";
 import { db } from "@/db";
 import { templates, templateFields } from "@/db/schema";
 import { eq, and, sql } from "drizzle-orm";
@@ -7,6 +8,11 @@ import { generateThumbnail } from "@/lib/render/thumbnail";
 import { deleteFile } from "@/lib/storage";
 import { designHasVideo, documentFields } from "@/lib/editor/design-fields";
 import { templateUpdateSchema } from "@/lib/validation";
+import {
+  TEMPLATE_JSON_LIMIT,
+  bodyErrorResponse,
+  readJsonBodyOrNull,
+} from "@/lib/json-body";
 
 export async function GET(
   request: Request,
@@ -14,6 +20,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
+    if (!isUuid(id)) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 });
+    }
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -60,6 +69,9 @@ export async function PUT(
 ) {
   try {
     const { id } = await params;
+    if (!isUuid(id)) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 });
+    }
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -68,7 +80,7 @@ export async function PUT(
     // Same reasoning as the create route: an unbounded width/height persisted
     // here becomes an out-of-memory failure in every later render.
     const parsed = templateUpdateSchema.safeParse(
-      await request.json().catch(() => null),
+      await readJsonBodyOrNull(request, TEMPLATE_JSON_LIMIT),
     );
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
@@ -189,6 +201,8 @@ export async function PUT(
 
     return NextResponse.json(template);
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     console.error("Error updating template:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -203,6 +217,9 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
+    if (!isUuid(id)) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 });
+    }
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -225,7 +242,9 @@ export async function DELETE(
     // best-effort, deleteFile ignores misses.
     const previous = existing?.thumbnailUrl;
     if (previous?.startsWith("/storage/")) {
-      void deleteFile(previous.replace(/^\/storage\//, ""));
+      deleteFile(previous.replace(/^\/storage\//, "")).catch((err) =>
+        console.error("Could not remove template thumbnail:", err instanceof Error ? err.message : err),
+      );
     }
 
     return NextResponse.json({ success: true });

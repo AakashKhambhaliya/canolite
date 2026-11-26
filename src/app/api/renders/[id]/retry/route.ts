@@ -5,6 +5,7 @@ import { eq, and } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { processRenderJob } from "@/lib/render/process-job";
 import { processVideoJob } from "@/lib/render/process-video-job";
+import { isUuid } from "@/lib/utils";
 
 export async function POST(
   request: Request,
@@ -32,7 +33,10 @@ export async function POST(
       })
       .where(
         and(
-          eq(renderJobs.id, id),
+          // Accept the public uid (what the API hands out, and what GET and
+          // DELETE accept) as well as the row id. Binding a uid to the uuid
+          // column made Postgres reject the query, so retry always 500'd.
+          isUuid(id) ? eq(renderJobs.id, id) : eq(renderJobs.uid, id),
           eq(renderJobs.status, "failed"),
           eq(renderJobs.projectId, user.projectId)
         )

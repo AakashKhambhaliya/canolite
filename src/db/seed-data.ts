@@ -149,6 +149,16 @@ export async function autoProvisionAdminFromEnv(db: any): Promise<void> {
  * `npm run db:seed` script.
  */
 export async function seedIfEmpty(db: any): Promise<void> {
+  // One transaction: a crash mid-seed must not leave an admin user with no
+  // project (the next boot would see a user and skip seeding for good).
+  // ensureDb() also runs this under the migration advisory lock, so two
+  // replicas can't both find the DB empty.
+  await db.transaction(async (tx: any) => {
+    await seedIntoEmpty(tx);
+  });
+}
+
+async function seedIntoEmpty(db: any): Promise<void> {
   const existing = await db.select().from(schema.users).limit(1);
   if (existing.length > 0) {
     return;

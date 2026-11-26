@@ -27,7 +27,8 @@ type DrizzleDb = NodePgDatabase<typeof schema>;
 
 type PgClientLike = {
   query: (text: string, values?: unknown[]) => Promise<unknown>;
-  release: () => void;
+  /** Passing true destroys the connection instead of returning it to the pool. */
+  release: (destroy?: boolean) => void;
 };
 
 type PgPoolLike = {
@@ -42,6 +43,7 @@ const globalForDb = globalThis as unknown as {
   __canolitePgPool?: PgPoolLike;
   __canoliteDatabaseUrl?: string;
   __canoliteShutdownInstalled?: boolean;
+  __canoliteShutdownOwned?: boolean;
 };
 
 function dbPoolMax(): number {
@@ -87,31 +89,47 @@ function wrapConnectionError(error: unknown): Error {
   );
 }
 
+/**
+ * Close the pool, then (embedded mode) stop Postgres, in that order, so no
+ * query is cut off by the server disappearing underneath it. Safe to call more
+ * than once.
+ */
+export async function closeDatabase(reason = "shutdown"): Promise<void> {
+  try {
+    const pool = globalForDb.__canolitePgPool;
+    if (pool) {
+      globalForDb.__canolitePgPool = undefined;
+      console.log(`[db] Closing PostgreSQL pool on ${reason}`);
+      await pool.end();
+    }
+    if (useEmbeddedPostgres) {
+      await stopEmbeddedPostgres();
+    }
+  } catch (error) {
+    console.error("[db] Error while closing database connections:", error);
+  }
+}
+
+/**
+ * An entrypoint with its own graceful shutdown (the BullMQ worker, which must
+ * let in-flight jobs finish first) calls this, then calls closeDatabase()
+ * itself. The default signal handlers below then stand aside instead of
+ * closing the pool and exiting underneath it.
+ */
+export function takeOverDatabaseShutdown(): void {
+  globalForDb.__canoliteShutdownOwned = true;
+}
+
 function installShutdownHandlers(): void {
   if (globalForDb.__canoliteShutdownInstalled) return;
   globalForDb.__canoliteShutdownInstalled = true;
 
-  const shutdown = async (signal: NodeJS.Signals) => {
-    try {
-      if (globalForDb.__canolitePgPool) {
-        console.log(`[db] Closing PostgreSQL pool on ${signal}`);
-        await globalForDb.__canolitePgPool.end();
-        globalForDb.__canolitePgPool = undefined;
-      }
-      if (useEmbeddedPostgres) {
-        await stopEmbeddedPostgres();
-      }
-    } catch (error) {
-      console.error("[db] Error while closing database connections:", error);
-    }
+  const onSignal = (signal: NodeJS.Signals) => {
+    if (globalForDb.__canoliteShutdownOwned) return;
+    void closeDatabase(signal).finally(() => process.exit(0));
   };
-
-  process.once("SIGTERM", () => {
-    void shutdown("SIGTERM").finally(() => process.exit(0));
-  });
-  process.once("SIGINT", () => {
-    void shutdown("SIGINT").finally(() => process.exit(0));
-  });
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
 }
 
 function buildDb(connectionString: string) {
@@ -126,6 +144,13 @@ function buildDb(connectionString: string) {
       idleTimeoutMillis: dbIdleTimeoutMillis(),
       connectionTimeoutMillis: dbConnectionTimeoutMillis(),
       ssl: transport.ssl,
+    });
+    // An idle client whose backend goes away (DB restart, pg_terminate_backend,
+    // a pooler/firewall reset) makes the Pool emit 'error'. With no listener
+    // that is an uncaught exception that kills the whole server. The pool has
+    // already discarded the broken client, so logging is all that's needed.
+    pool.on("error", (error: Error) => {
+      console.error("[db] Idle PostgreSQL client error:", error.message);
     });
     // Timestamp columns are `timestamp without time zone`. Values written from
     // JS are serialised as UTC, but `defaultNow()` / `now()` are evaluated in
@@ -224,24 +249,49 @@ async function runLegacyPgliteMigrationIfNeeded(connectionString: string): Promi
   });
 }
 
-async function runMigrations(): Promise<void> {
+/**
+ * Run fn while holding the cross-instance migration advisory lock, on one
+ * dedicated connection, handed to fn as a drizzle db so the work inside never
+ * needs a second pool connection (DB_POOL_MAX=1 can't deadlock).
+ *
+ * If anything fails the connection is DESTROYED rather than returned to the
+ * pool: an aborted transaction or a failed unlock could otherwise leave a
+ * poisoned client, still holding the session-level lock, in circulation.
+ * Closing the session releases the lock server-side. An unlock failure is
+ * logged, never thrown, so it can't mask the real error from fn.
+ */
+async function withMigrationLock<T>(fn: (lockedDb: DrizzleDb) => Promise<T>): Promise<T> {
   const pool = globalForDb.__canolitePgPool;
   if (!pool) throw new Error("PostgreSQL pool was not initialized before migrations.");
 
   const { drizzle } = require("drizzle-orm/node-postgres");
-  const { migrate } = require("drizzle-orm/node-postgres/migrator");
   const client = await pool.connect();
+  let healthy = false;
   try {
     await client.query("select pg_advisory_lock($1)", [MIGRATION_LOCK_ID]);
-    const lockedDb = drizzle(client, { schema });
-    await migrate(lockedDb, { migrationsFolder: "./drizzle" });
-  } finally {
+    let result: T;
     try {
-      await client.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_ID]);
+      result = await fn(drizzle(client, { schema }) as DrizzleDb);
     } finally {
-      client.release();
+      try {
+        await client.query("select pg_advisory_unlock($1)", [MIGRATION_LOCK_ID]);
+        healthy = true;
+      } catch (unlockError) {
+        console.error("[db] Could not release the migration lock; dropping the connection:", unlockError);
+      }
     }
+    return result;
+  } catch (error) {
+    healthy = false;
+    throw error;
+  } finally {
+    client.release(!healthy);
   }
+}
+
+async function runMigrations(lockedDb: DrizzleDb): Promise<void> {
+  const { migrate } = require("drizzle-orm/node-postgres/migrator");
+  await migrate(lockedDb, { migrationsFolder: "./drizzle" });
 }
 
 export async function checkDatabaseHealth(): Promise<{
@@ -281,32 +331,37 @@ export async function ensureDb(): Promise<void> {
     await connectivityCheck();
     console.log("[db] Connectivity check passed.");
 
-    // Back up before applying any pending migration — never on every boot.
-    // Failures must not block boot, so everything is logged and swallowed.
-    try {
-      const { hasPendingMigrations, createBackup } = require("../lib/backup");
-      if (await hasPendingMigrations(db as any)) {
-        await createBackup("pre-migration");
+    // Backup, migrations and seeding all run under ONE advisory lock, so
+    // replicas booting together can't each back up, or both seed an empty DB
+    // (a unique-constraint crash, or an admin row with no project).
+    await withMigrationLock(async (lockedDb) => {
+      // Back up before applying any pending migration, never on every boot.
+      // Failures must not block boot, so everything is logged and swallowed.
+      try {
+        const { hasPendingMigrations, createBackup } = require("../lib/backup");
+        if (await hasPendingMigrations(lockedDb as any)) {
+          await createBackup("pre-migration");
+        }
+      } catch (e) {
+        console.warn(
+          "[backup] Pre-migration backup skipped:",
+          e instanceof Error ? e.message : e
+        );
       }
-    } catch (e) {
-      console.warn(
-        "[backup] Pre-migration backup skipped:",
-        e instanceof Error ? e.message : e
-      );
-    }
 
-    try {
-      await runMigrations();
-      console.log("[db] Migrations applied successfully.");
-      await runLegacyPgliteMigrationIfNeeded(connectionString);
-    } catch (error) {
-      console.error("[db] Migration failed:", error);
-      throw error;
-    }
+      try {
+        await runMigrations(lockedDb);
+        console.log("[db] Migrations applied successfully.");
+        await runLegacyPgliteMigrationIfNeeded(connectionString);
+      } catch (error) {
+        console.error("[db] Migration failed:", error);
+        throw error;
+      }
 
-    const { seedIfEmpty, autoProvisionAdminFromEnv } = require("./seed-data");
-    await seedIfEmpty(db);
-    await autoProvisionAdminFromEnv(db);
+      const { seedIfEmpty, autoProvisionAdminFromEnv } = require("./seed-data");
+      await seedIfEmpty(lockedDb);
+      await autoProvisionAdminFromEnv(lockedDb);
+    });
   })().catch((error) => {
     globalForDb.__canoliteReady = undefined;
     throw error;

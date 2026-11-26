@@ -60,6 +60,12 @@ export default function DocsPage() {
     templateData?.fields?.map((f: any) => {
       if (f.type === "image")
         return { name: f.name, image_url: "https://example.com/image.png" };
+      // Same field-type → key mapping as applyModifications on the server:
+      // a video field ignores `text`, and a shape takes `fill`.
+      if (f.type === "video")
+        return { name: f.name, video_url: "https://example.com/video.mp4" };
+      if (f.type === "shape")
+        return { name: f.name, fill: f.defaultValue || "#ff0000" };
       return { name: f.name, text: f.defaultValue || `Your ${f.name}` };
     }) || [];
 

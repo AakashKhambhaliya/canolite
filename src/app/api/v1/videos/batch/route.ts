@@ -15,7 +15,7 @@ import {
 } from "@/lib/output-settings";
 import { createVideoBatchJobs } from "@/lib/render/create-job";
 import { processVideoBatch } from "@/lib/render/process-video-job";
-import { isUrlSafe } from "@/lib/ssrf";
+import { createUrlSafetyChecker, TooManyHostsError } from "@/lib/ssrf";
 
 const schema = z.object({
   template_id: z.string().min(1),
@@ -35,9 +35,15 @@ export async function POST(request: Request) {
     const parsed = schema.safeParse(await renderBody(request));
     if (!parsed.success) return withCors(NextResponse.json({ error: "Validation error", details: parsed.error.issues }, { status: 400 }));
     const { template_id, items, fps, duration, quality, scale } = parsed.data;
-    for (const item of items) {
-      if (item.webhook_url && !(await isUrlSafe(item.webhook_url))) return withCors(NextResponse.json({ error: "webhook_url must be a public http(s) URL" }, { status: 400 }));
+    const check = createUrlSafetyChecker();
+    let webhooksOk: boolean[];
+    try {
+      webhooksOk = await Promise.all(items.map((item) => (item.webhook_url ? check(item.webhook_url) : true)));
+    } catch (error) {
+      if (error instanceof TooManyHostsError) return withCors(NextResponse.json({ error: error.message }, { status: 400 }));
+      throw error;
     }
+    if (webhooksOk.includes(false)) return withCors(NextResponse.json({ error: "webhook_url must be a public http(s) URL" }, { status: 400 }));
     const created = await createVideoBatchJobs({ projectId: auth.projectId, templateId: template_id, items, output: { fps, durationSec: duration, quality, scale } });
     if (!created) return withCors(NextResponse.json({ error: "Template not found" }, { status: 404 }));
     void processVideoBatch(created.uids);
@@ -45,6 +51,10 @@ export async function POST(request: Request) {
   } catch (error: any) {
     if (error instanceof RenderAdmissionError) return withCors(NextResponse.json({error:error.message}, {status:error.status,headers:error.status === 429 ? {"Retry-After":"10"} : undefined}));
     console.error("Video batch API error:", error);
-    return withCors(NextResponse.json({ error: error?.message || "Internal server error" }, { status: /does not contain video/i.test(error?.message || "") ? 400 : 500 }));
+    // Only the known client error is echoed back; any other message is
+    // internal detail (paths, SQL, stack context) and stays in the log.
+    const clientError = /does not contain video/i.test(error?.message || "");
+    if (!clientError) console.error("[v1/videos] render request failed:", error);
+    return withCors(NextResponse.json({ error: clientError ? error.message : "Internal server error" }, { status: clientError ? 400 : 500 }));
   }
 }

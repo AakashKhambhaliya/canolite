@@ -7,6 +7,7 @@ import {
   purgeAllRenders,
 } from "@/lib/render/cleanup";
 import { cleanupRequestSchema } from "@/lib/validation";
+import { readJsonBodyOrNull, SMALL_JSON_LIMIT } from "@/lib/json-body";
 import { db } from "@/db";
 import { projects } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -77,7 +78,7 @@ export async function POST(request: Request) {
 
     // A body is optional — an empty POST still means "sweep by retention",
     // which is what the previous version of this route did.
-    const raw = await request.json().catch(() => ({}));
+    const raw = (await readJsonBodyOrNull(request, SMALL_JSON_LIMIT).catch(() => null)) ?? {};
     const parsed = cleanupRequestSchema.safeParse(raw ?? {});
     if (!parsed.success) {
       return NextResponse.json(

@@ -28,6 +28,7 @@ const globalForEmbedded = globalThis as unknown as {
   __canoliteEmbeddedPg?: EmbeddedRuntime;
   __canoliteEmbeddedPgPromise?: Promise<EmbeddedRuntime>;
   __canoliteEmbeddedShutdownInstalled?: boolean;
+  __canoliteEmbeddedStopPromise?: Promise<void>;
 };
 
 function dataDir(): string {
@@ -62,21 +63,53 @@ async function isInitialized(dir: string): Promise<boolean> {
   return exists(path.join(dir, "PG_VERSION"));
 }
 
+async function readCredentials(file: string): Promise<EmbeddedCredentials> {
+  const raw = await fs.readFile(file, "utf8");
+  try {
+    return JSON.parse(raw) as EmbeddedCredentials;
+  } catch (error) {
+    // Never "repair" this by generating a new password: an initialised pgdata
+    // only accepts the original one, so that would lock the app out for good.
+    throw new Error(
+      `Embedded PostgreSQL credentials file ${file} is unreadable (${error instanceof Error ? error.message : String(error)}). ` +
+        "Restore it from a backup; it must hold the password the data directory was initialised with."
+    );
+  }
+}
+
 async function readOrCreateCredentials(dir: string): Promise<EmbeddedCredentials> {
   const file = credentialsPath(dir);
   try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as EmbeddedCredentials;
-  } catch {
-    const creds: EmbeddedCredentials = {
-      version: CREDENTIALS_VERSION,
-      user: "canolite",
-      password: crypto.randomBytes(24).toString("base64url"),
-      database: DB_NAME,
-      port: port(),
-    };
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, JSON.stringify(creds, null, 2), { mode: 0o600 });
+    return await readCredentials(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  }
+
+  // Missing file. Only a fresh (uninitialised) data dir may get new
+  // credentials; an initialised one would reject them.
+  if (await isInitialized(dir)) {
+    throw new Error(
+      `Embedded PostgreSQL credentials file ${file} is missing but ${dir} is already initialised. ` +
+        "Restore pg-credentials.json from a backup, or move the data directory aside to start fresh."
+    );
+  }
+
+  const creds: EmbeddedCredentials = {
+    version: CREDENTIALS_VERSION,
+    user: "canolite",
+    password: crypto.randomBytes(24).toString("base64url"),
+    database: DB_NAME,
+    port: port(),
+  };
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  try {
+    // "wx": create exclusively, so two processes booting together can't each
+    // write a different password — the loser reads the winner's file.
+    await fs.writeFile(file, JSON.stringify(creds, null, 2), { mode: 0o600, flag: "wx" });
     return creds;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") return readCredentials(file);
+    throw error;
   }
 }
 
@@ -106,8 +139,10 @@ function pidIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // EPERM means the process EXISTS but belongs to another user — it is
+    // alive, and its postmaster.pid must not be deleted.
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
   }
 }
 
@@ -235,22 +270,30 @@ function installShutdownHandlers(): void {
   if (globalForEmbedded.__canoliteEmbeddedShutdownInstalled) return;
   globalForEmbedded.__canoliteEmbeddedShutdownInstalled = true;
 
-  const stop = async () => {
-    await stopEmbeddedPostgres();
-  };
-
-  process.once("SIGTERM", () => void stop());
-  process.once("SIGINT", () => void stop());
-  process.once("beforeExit", () => void stop());
+  // SIGTERM/SIGINT are NOT handled here: src/db/index.ts owns signal-driven
+  // shutdown so it can drain the pool BEFORE Postgres stops (stopping it here
+  // too raced that drain). beforeExit covers a natural, signal-free exit.
+  process.once("beforeExit", () => {
+    stopEmbeddedPostgres().catch((error) =>
+      console.error("[db] Error stopping embedded PostgreSQL:", error)
+    );
+  });
 }
 
-export async function stopEmbeddedPostgres(): Promise<void> {
-  const runtime = globalForEmbedded.__canoliteEmbeddedPg;
-  if (runtime?.ownsProcess) {
-    console.log("[db] Stopping embedded PostgreSQL.");
-    await runtime.stop();
+/** Stop the embedded server. Concurrent callers share one in-flight stop. */
+export function stopEmbeddedPostgres(): Promise<void> {
+  if (globalForEmbedded.__canoliteEmbeddedStopPromise) {
+    return globalForEmbedded.__canoliteEmbeddedStopPromise;
   }
+  const runtime = globalForEmbedded.__canoliteEmbeddedPg;
   globalForEmbedded.__canoliteEmbeddedPg = undefined;
+  if (!runtime?.ownsProcess) return Promise.resolve();
+  console.log("[db] Stopping embedded PostgreSQL.");
+  const stopping = runtime.stop().finally(() => {
+    globalForEmbedded.__canoliteEmbeddedStopPromise = undefined;
+  });
+  globalForEmbedded.__canoliteEmbeddedStopPromise = stopping;
+  return stopping;
 }
 
 export async function getEmbeddedPostgres(): Promise<EmbeddedRuntime> {

@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { createSession } from "@/lib/auth";
 import { getAdminUser, verifyPassword } from "@/lib/admin";
 import {
-  checkRateLimit,
   clearRateLimit,
   clientKey,
-  recordFailure,
+  releaseAttempt,
+  reserveAttempt,
 } from "@/lib/rate-limit";
+import { bodyErrorResponse, readJsonBody } from "@/lib/json-body";
 
 /**
  * Brute-force limits. There is exactly one account on a Canolite instance, so
@@ -45,17 +46,29 @@ function lockedOut(retryAfterSec: number) {
  * client is told to redirect to the setup wizard.
  */
 export async function POST(request: Request) {
+  const ipKey = `login:${clientKey(request)}`;
+
+  // Reserve a slot in BOTH buckets synchronously, before any await. A plain
+  // check here followed by recording the failure after bcrypt let a concurrent
+  // burst all pass the check at once. Reserving counts in-flight attempts, so
+  // at most `limit` attempts can ever be past this point per window, and a
+  // locked-out caller never gets to spend server CPU on a hash comparison.
+  const ipState = reserveAttempt(ipKey, PER_IP_LIMIT);
+  if (!ipState.allowed) return lockedOut(ipState.retryAfterSec);
+  const globalState = reserveAttempt(GLOBAL_KEY, GLOBAL_LIMIT);
+  if (!globalState.allowed) {
+    releaseAttempt(ipKey);
+    return lockedOut(globalState.retryAfterSec);
+  }
+
+  // Whether this attempt was a real wrong-credentials guess. Anything else
+  // (malformed body, setup not done, server error, success) hands both
+  // reserved slots back.
+  let countsAsFailure = false;
   try {
-    const ipKey = `login:${clientKey(request)}`;
-
-    // Check both buckets BEFORE touching bcrypt — a locked-out caller must not
-    // get to spend server CPU on a hash comparison.
-    const ipState = checkRateLimit(ipKey, PER_IP_LIMIT);
-    if (!ipState.allowed) return lockedOut(ipState.retryAfterSec);
-    const globalState = checkRateLimit(GLOBAL_KEY, GLOBAL_LIMIT);
-    if (!globalState.allowed) return lockedOut(globalState.retryAfterSec);
-
-    const { email, password } = await request.json();
+    const body = await readJsonBody<{ email?: unknown; password?: unknown }>(request);
+    const email = body?.email;
+    const password = body?.password;
 
     if (!email || typeof email !== "string") {
       return NextResponse.json({ error: "Email is required" }, { status: 400 });
@@ -77,11 +90,13 @@ export async function POST(request: Request) {
       email.trim().toLowerCase() === (admin.email || "").toLowerCase();
     const passwordOk = await verifyPassword(password, admin.passwordHash);
     if (!emailOk || !passwordOk) {
-      recordFailure(GLOBAL_KEY, GLOBAL_LIMIT);
-      const next = recordFailure(ipKey, PER_IP_LIMIT);
+      countsAsFailure = true;
       // Report the lockout on the attempt that trips it, rather than letting
-      // the caller discover it only on their next request.
-      if (!next.allowed) return lockedOut(next.retryAfterSec);
+      // the caller discover it only on their next request. Decided by this
+      // attempt's own reservation, not the live bucket: concurrent attempts
+      // still in flight have also reserved, so the bucket already looks full
+      // to all of them.
+      if (ipState.remaining === 0) return lockedOut(ipState.lockoutSec ?? 1);
       return NextResponse.json(
         { error: "Invalid email or password" },
         { status: 401 }
@@ -99,10 +114,17 @@ export async function POST(request: Request) {
       user: { id: admin.id, name: admin.name, email: admin.email },
     });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     console.error("Login error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
     );
+  } finally {
+    if (!countsAsFailure) {
+      releaseAttempt(ipKey);
+      releaseAttempt(GLOBAL_KEY);
+    }
   }
 }

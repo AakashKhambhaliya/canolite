@@ -39,7 +39,6 @@ import {
   CheckCircle2,
   Loader2,
   Filter,
-  Eye,
   FileImage,
   Trash2,
   Download,
@@ -79,6 +78,18 @@ const STATUS_CONFIG: Record<string, { label: string; variant: any; icon: any }> 
     icon: AlertCircle,
   },
 };
+
+/**
+ * Open a render's output in a new tab. Only same-origin paths and http(s) URLs
+ * are allowed (never javascript:/data:), and the new tab gets no
+ * window.opener handle back to this admin page.
+ */
+function openSafe(url: string | null | undefined) {
+  if (!url) return;
+  const ok = (url.startsWith("/") && !url.startsWith("//")) || /^https?:\/\//i.test(url);
+  if (!ok) return;
+  window.open(url, "_blank", "noopener,noreferrer");
+}
 
 function RendersContent() {
   const queryClient = useQueryClient();
@@ -182,7 +193,7 @@ function RendersContent() {
   const anyDone = renders?.some((r: any) => r.status === "done") ?? false;
   const canDownload = batchUid ? batchDone > 0 : anyDone;
   const downloadHref = batchUid
-    ? `/api/renders/download?batch=${batchUid}`
+    ? `/api/renders/download?batch=${encodeURIComponent(batchUid)}`
     : `/api/renders/download`;
 
   return (
@@ -447,7 +458,7 @@ function RendersContent() {
                         size="icon-sm"
                         onClick={(e) => {
                           e.stopPropagation();
-                          window.open(render.imageUrl, "_blank");
+                          openSafe(render.imageUrl);
                         }}
                       >
                         <ExternalLink className="h-4 w-4" />
@@ -647,7 +658,7 @@ function RendersContent() {
                       variant="outline"
                       size="sm"
                       onClick={() =>
-                        window.open(selectedRender.imageUrl, "_blank")
+                        openSafe(selectedRender.imageUrl)
                       }
                     >
                       <ExternalLink className="mr-1.5 h-3.5 w-3.5" />

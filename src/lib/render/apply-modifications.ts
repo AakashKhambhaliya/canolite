@@ -11,7 +11,9 @@
  * - Style overrides validated against allowlist
  */
 import { walkDesignObjects } from "@/lib/design/walk";
-import { isImage, isText, objectType } from "@/lib/design/predicates";
+import { isImage, isText } from "@/lib/design/predicates";
+import googleFontsRaw from "@/lib/editor/google-fonts.json";
+import { SYSTEM_FONTS } from "@/lib/editor/font-loader";
 
 export interface Modification {
   name: string;
@@ -127,13 +129,30 @@ const BUNDLED_FONTS = new Set([
   "Arimo",
 ]);
 
+/**
+ * Every family the renderer can actually draw without project uploads: the
+ * bundled set, the full Google Fonts catalogue the renderer loads on demand,
+ * and the OS fonts. Defaulting to BUNDLED_FONTS alone silently rejected
+ * >95% of Google Fonts as an override.
+ */
+export const DEFAULT_RENDER_FONTS: ReadonlySet<string> = new Set([
+  ...BUNDLED_FONTS,
+  ...(googleFontsRaw as Array<{ family: string }>).map((f) => f.family),
+  ...SYSTEM_FONTS,
+]);
+
+/** DEFAULT_RENDER_FONTS plus a project's own uploaded font families. */
+export function fontsWithCustom(customFamilies: Iterable<string>): Set<string> {
+  return new Set([...DEFAULT_RENDER_FONTS, ...customFamilies]);
+}
+
 export function applyModifications(
   designJson: any,
   modifications: Modification[],
-  availableFonts?: Set<string>
+  availableFonts?: ReadonlySet<string>
 ): ApplyResult {
   const warnings: string[] = [];
-  const fonts = availableFonts || BUNDLED_FONTS;
+  const fonts = availableFonts || DEFAULT_RENDER_FONTS;
 
   // Deep clone to avoid mutation. A template can have designJson: null (no
   // NOT NULL constraint on the column, and the templates PUT route accepts
@@ -178,7 +197,6 @@ export function applyModifications(
       }
     }
 
-    const objType = objectType(obj);
     const isTextLayer = isText(obj);
     const isVideoLayer = isImage(obj) && obj.mediaType === "video";
     const isImageLayer = isImage(obj) && !isVideoLayer;
@@ -270,7 +288,7 @@ export function applyModifications(
       if (mod.opacity !== undefined) obj.opacity = mod.opacity;
       if (mod.backgroundColor) obj.backgroundColor = mod.backgroundColor;
 
-      for (const [key, value] of Object.entries(mod)) {
+      for (const key of Object.keys(mod)) {
         if (
           key === "name" ||
           key === "fill" ||
@@ -278,11 +296,9 @@ export function applyModifications(
           key === "backgroundColor"
         )
           continue;
-        if (key !== "name") {
-          warnings.push(
-            `Property "${key}" not supported for layer type "${obj.type}" on "${mod.name}" — ignored`
-          );
-        }
+        warnings.push(
+          `Property "${key}" not supported for layer type "${obj.type}" on "${mod.name}" — ignored`
+        );
       }
     }
   }

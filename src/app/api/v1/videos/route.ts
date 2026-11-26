@@ -40,6 +40,10 @@ export async function POST(request: Request) {
   } catch (error: any) {
     if (error instanceof RenderAdmissionError) return withCors(NextResponse.json({error:error.message}, {status:error.status,headers:error.status === 429 ? {"Retry-After":"10"} : undefined}));
     console.error("Video render API error:", error);
-    return withCors(NextResponse.json({ error: error?.message || "Internal server error" }, { status: /does not contain video/i.test(error?.message || "") ? 400 : 500 }));
+    // Only the known client error is echoed back; any other message is
+    // internal detail (paths, SQL, stack context) and stays in the log.
+    const clientError = /does not contain video/i.test(error?.message || "");
+    if (!clientError) console.error("[v1/videos] render request failed:", error);
+    return withCors(NextResponse.json({ error: clientError ? error.message : "Internal server error" }, { status: clientError ? 400 : 500 }));
   }
 }

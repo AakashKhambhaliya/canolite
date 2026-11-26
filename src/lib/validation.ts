@@ -135,7 +135,7 @@ export const settingsSchema = z.object({
   // covers every render the app can make.
   defaultFps: z.coerce.number().min(MIN_FPS).max(MAX_FPS).optional(),
   defaultVideoQuality: z.enum(VIDEO_QUALITY_PRESETS).optional(),
-  retentionHours: z.coerce.number().min(1).max(8760).optional(),
+  retentionHours: z.coerce.number().int("must be a whole number of hours").min(1).max(8760).optional(),
 });
 
 /**
@@ -149,12 +149,6 @@ export const settingsSchema = z.object({
  */
 export const cleanupRequestSchema = z.object({
   scope: z.enum(["retention", "all"]).optional().default("retention"),
-  retentionHours: z.coerce.number().min(1).max(8760).optional(),
+  retentionHours: z.coerce.number().int("must be a whole number of hours").min(1).max(8760).optional(),
 });
 
-export type TemplateCreateRequest = z.infer<typeof templateCreateSchema>;
-export type TemplateUpdateRequest = z.infer<typeof templateUpdateSchema>;
-export type RenderRequest = z.infer<typeof renderRequestSchema>;
-export type VideoRenderRequest = z.infer<typeof videoRenderRequestSchema>;
-export type BatchRequest = z.infer<typeof batchRequestSchema>;
-export type SettingsRequest = z.infer<typeof settingsSchema>;

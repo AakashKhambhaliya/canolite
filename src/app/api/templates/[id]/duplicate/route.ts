@@ -4,8 +4,13 @@ import { templates, templateFields } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { templateUpdateSchema } from "@/lib/validation";
+import {
+  TEMPLATE_JSON_LIMIT,
+  bodyErrorResponse,
+  readJsonBodyOrNull,
+} from "@/lib/json-body";
 import { designHasVideo, documentFields } from "@/lib/editor/design-fields";
-import { generateId } from "@/lib/utils";
+import { generateId, isUuid } from "@/lib/utils";
 import { generateThumbnail } from "@/lib/render/thumbnail";
 
 export async function POST(
@@ -14,6 +19,9 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
+    if (!isUuid(id)) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 });
+    }
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -42,10 +50,7 @@ export async function POST(
     // caller can instead copy its unsaved draft. Neither path writes to the
     // original row; the copy and its derived field index commit together.
     const parsed = templateUpdateSchema.safeParse(
-      await request
-        .text()
-        .then((text) => (text.trim() ? JSON.parse(text) : {}))
-        .catch(() => null),
+      await readJsonBodyOrNull(request, TEMPLATE_JSON_LIMIT),
     );
     if (!parsed.success)
       return NextResponse.json(
@@ -104,6 +109,8 @@ export async function POST(
 
     return NextResponse.json(duplicate, { status: 201 });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     console.error("Error duplicating template:", error);
     return NextResponse.json(
       { error: "Internal server error" },

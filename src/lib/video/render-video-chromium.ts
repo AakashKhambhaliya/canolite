@@ -24,8 +24,9 @@ import sharp from "sharp";
 import type { Page } from "playwright";
 import { config } from "@/lib/config";
 import { createArtworkVerifier } from "@/lib/design/loaded-artwork";
-import { buildFontHead, getBrowser, getFabricSource, type CustomFontRef } from "@/lib/render/render-image";
-import { sourceTimeForFrame } from "./timeline";
+import { buildFontHead, getFabricSource, type CustomFontRef } from "@/lib/render/render-image";
+import { sourceTimeForFrame, type VideoLayer } from "./timeline";
+import { enableWindowSec } from "./filtergraph";
 import { decodeLayerFrames, type DecodedLayer } from "./decode";
 import { startMp4Encoder } from "./encode";
 import { OrderedFramePipeline } from "./ordered-frame-pipeline";
@@ -123,8 +124,12 @@ export async function setupRenderPage(
         objs.forEach((o, i) => {
           const p = prefix ? `${prefix}.${i}` : `${i}`;
           if (o.mediaType === "video") {
-            map.set(o.id || p, o);
-            if (o.name) map.set(o.name, o);
+            // The tree path is unique and matches timeline layerPath. id/name
+            // are fallbacks only, and never overwrite an earlier layer's entry
+            // (duplicates used to remap two layers onto one object).
+            map.set(`path:${p}`, o);
+            if (o.id && !map.has(o.id)) map.set(o.id, o);
+            if (o.name && !map.has(o.name)) map.set(o.name, o);
             o.__originalOpacity = o.opacity ?? 1;
             o.objectCaching = false;
           }
@@ -150,7 +155,7 @@ export async function setupRenderPage(
 export async function renderFrameOnPage(
   page: Page,
   params: {
-    updates: Array<{ layerId: string; name: string; url: string | null; boxW: number; boxH: number }>;
+    updates: Array<{ layerPath?: string; layerId: string; name: string; url: string | null; boxW: number; boxH: number }>;
     scale: number;
   }
 ): Promise<Buffer> {
@@ -160,7 +165,7 @@ export async function renderFrameOnPage(
       const map: Map<string, any> = (window as any).__canoliteVideoMap;
       const loads: Promise<void>[] = [];
       for (const u of updates as any[]) {
-        const obj = map.get(u.layerId) || map.get(u.name);
+        const obj = (u.layerPath !== undefined && map.get(`path:${u.layerPath}`)) || map.get(u.layerId) || map.get(u.name);
         if (!obj) continue;
         if (!u.url) {
           obj.opacity = 0;
@@ -175,7 +180,11 @@ export async function renderFrameOnPage(
             const el: any = obj.getElement?.() || obj._element;
             const nw = el?.naturalWidth || obj.width || 1;
             const nh = el?.naturalHeight || obj.height || 1;
-            obj.set({ width: nw, height: nh, scaleX: u.boxW / nw, scaleY: u.boxH / nh, cropX: 0, cropY: 0 });
+            // Keep the sign of the original scale: a mirrored layer stays
+            // mirrored (boxW/boxH are magnitudes).
+            const sx = (obj.scaleX ?? 1) < 0 ? -1 : 1;
+            const sy = (obj.scaleY ?? 1) < 0 ? -1 : 1;
+            obj.set({ width: nw, height: nh, scaleX: (sx * u.boxW) / nw, scaleY: (sy * u.boxH) / nh, cropX: 0, cropY: 0 });
           })()
         );
       }
@@ -202,8 +211,18 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
 
   try {
     const decoded: DecodedLayer[] = [];
+    // Layers that are hidden, or never visible on this timeline (empty trim
+    // window, or starting after the end), are not decoded at all: decoding
+    // them leaked a hidden layer's audio into the mix, and a zero-span layer
+    // failed the whole render with "No frames decoded". They are still sent
+    // to the page with no frame so their placeholder stays hidden.
+    const skipped: VideoLayer[] = [];
     for (const [index, layer] of timeline.layers.entries()) {
-      decoded.push(await decodeLayerFrames({ layer, fps: timeline.fps, tmpDir, storageTmpKey, outputScale }));
+      if (layer.hidden || !enableWindowSec(layer, timeline.durationSec)) {
+        skipped.push(layer);
+      } else {
+        decoded.push(await decodeLayerFrames({ layer, fps: timeline.fps, tmpDir, storageTmpKey, outputScale }));
+      }
       await ctx.onProgress?.(Math.round(((index + 1) / timeline.layers.length) * DECODE_PROGRESS_CEILING));
     }
 
@@ -225,13 +244,24 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
         }),
       renderOnPage: (page, frameIdx) =>
         renderFrameOnPage(page, {
-          updates: decoded.map((d) => ({
-            layerId: d.layer.layerId,
-            name: d.layer.name,
-            url: frameUrlForFrame(d, timeline, frameIdx),
-            boxW: d.layer.boxW,
-            boxH: d.layer.boxH,
-          })),
+          updates: [
+            ...decoded.map((d) => ({
+              layerPath: d.layer.layerPath,
+              layerId: d.layer.layerId,
+              name: d.layer.name,
+              url: frameUrlForFrame(d, timeline, frameIdx),
+              boxW: d.layer.boxW,
+              boxH: d.layer.boxH,
+            })),
+            ...skipped.map((layer) => ({
+              layerPath: layer.layerPath,
+              layerId: layer.layerId,
+              name: layer.name,
+              url: null,
+              boxW: layer.boxW,
+              boxH: layer.boxH,
+            })),
+          ],
           scale: outputScale,
         }),
     });
@@ -244,6 +274,7 @@ export async function renderVideoWithChromium(ctx: PreparedVideoRender): Promise
       fps: timeline.fps,
       crf: ctx.crf,
       audioLayers: decoded.filter((d) => d.audioPath),
+      durationSec: timeline.durationSec,
       frameFormat: "jpeg",
       encoder: ctx.encoder,
     });

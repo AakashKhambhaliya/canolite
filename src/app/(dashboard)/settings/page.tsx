@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -152,9 +152,15 @@ export default function SettingsPage() {
 
   const { data: renderStats } = useRenderStats();
 
-  // Populate form when settings load
+  // Populate the form from the server ONCE per load (and again after an
+  // explicit save). Re-running on every ["settings"] update meant a background
+  // refetch (stale cache on mount, network reconnect) silently wiped edits
+  // the operator hadn't saved yet — including the retention period used by
+  // "Clean Now".
+  const hydratedRef = useRef(false);
   useEffect(() => {
-    if (settings) {
+    if (settings && !hydratedRef.current) {
+      hydratedRef.current = true;
       setWebhookUrl(settings.webhookUrl || "");
       setWebhookSecret("");
       setOutput({
@@ -204,6 +210,8 @@ export default function SettingsPage() {
         throw new Error(data.error || "Failed to save");
       }
       setWebhookSecret("");
+      // Saved: let the refetch below re-hydrate the form from the server.
+      hydratedRef.current = false;
       // Every other screen resolves against these values, so refresh them.
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["cleanup-status"] });

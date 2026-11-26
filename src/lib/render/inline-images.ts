@@ -94,6 +94,8 @@ function sniffImageType(buf: Buffer): string | null {
     buf.toString("ascii", 8, 12) === "WEBP"
   )
     return "image/webp";
+  if (buf.length >= 12 && buf.toString("ascii", 4, 8) === "ftyp" && /^avi[fs]$/.test(buf.toString("ascii", 8, 12)))
+    return "image/avif";
   const head = buf.toString("utf8", 0, Math.min(buf.length, 256)).trim().toLowerCase();
   if (head.startsWith("<?xml") || head.startsWith("<svg")) return "image/svg+xml";
   return null;
@@ -113,7 +115,19 @@ async function fetchImage(url: string, maxBytes: number): Promise<FetchedImage> 
   if (!res.ok) throw new Error(`Remote image returned HTTP ${res.status}`);
   const contentType = (res.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
   const buf = res.bytes;
-  const type = contentType.startsWith("image/") ? contentType : sniffImageType(buf);
+  // The type comes from the BYTES, not the server's Content-Type: any
+  // "image/*" header used to be trusted, so formats sharp can't measure (RLE
+  // BMP, ICO, ...) skipped the pixel budget below and went straight into
+  // Chromium. Only formats we can identify by magic bytes are accepted; an
+  // SVG may also be recognised by its declared type plus an <svg> element
+  // (it can open with a comment or doctype).
+  const declaredSvg =
+    contentType === "image/svg+xml" &&
+    /<svg[s>]/i.test(buf.toString("utf8", 0, Math.min(buf.length, 4096)));
+  const type = sniffImageType(buf) ?? (declaredSvg ? "image/svg+xml" : null);
+  if (!type && contentType.startsWith("image/")) {
+    throw new Error(`Unsupported image format "${contentType}". Use PNG, JPEG, WebP, GIF, AVIF or SVG.`);
+  }
   if (!type) {
     throw new Error(
       `URL did not return an image (got "${contentType || "unknown"}"). ` +
@@ -135,6 +149,10 @@ async function fetchImage(url: string, maxBytes: number): Promise<FetchedImage> 
     // Non-raster (e.g. some SVGs) — fall back to no re-fit.
   }
 
+  // A raster image whose size can't be read can't be held to the budget, so
+  // it is rejected rather than trusted. (SVG is vector: its bytes are capped
+  // and it is drawn at the layer's size.)
+  if (type !== "image/svg+xml" && !(width && height)) throw new Error("Could not verify remote image dimensions");
   if (width && height && (width * height > 32_000_000 || Math.max(width,height) > 16384)) throw new Error("Remote image exceeds pixel budget");
   return { byteLength: buf.length, dataUrl: `data:${type};base64,${buf.toString("base64")}`, width, height };
 }

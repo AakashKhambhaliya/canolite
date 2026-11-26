@@ -132,6 +132,17 @@ export async function GET(
     // only here would protect just the STORAGE_DIR deploys. Declaring them
     // there covers both paths with one rule; repeating them here would emit
     // each header twice.
+    //
+    // Exception: SVG also gets its script-blocking CSP here, as defence in
+    // depth. The config rule matches the request path; this keys on the
+    // resolved file's real extension, so no URL spelling reaches an SVG
+    // without it.
+    ...(ext === "svg"
+      ? {
+          "Content-Security-Policy":
+            "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox",
+        }
+      : {}),
   };
 
   const range = parseRange(req.headers.get("range"), size);

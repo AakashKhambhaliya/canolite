@@ -4,6 +4,7 @@ import { projects } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { settingsSchema } from "@/lib/validation";
+import { bodyErrorResponse, readJsonBodyOrNull, SMALL_JSON_LIMIT } from "@/lib/json-body";
 import { isUrlSafe } from "@/lib/ssrf";
 import {
   normalizeFormat,
@@ -53,7 +54,7 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const parsed = settingsSchema.safeParse(await request.json());
+    const parsed = settingsSchema.safeParse(await readJsonBodyOrNull(request, SMALL_JSON_LIMIT));
     if (!parsed.success) {
       return NextResponse.json(
         { error: parsed.error.issues[0]?.message || "Invalid settings" },
@@ -101,6 +102,8 @@ export async function PUT(request: Request) {
     if (!valid) return NextResponse.json({error: "Save an HTTPS webhook URL to set a signing secret."}, {status: 400});
     return NextResponse.json({ success: true });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }

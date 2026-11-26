@@ -117,13 +117,26 @@ export function toAbsoluteUrl(url: string | null | undefined): string {
 /** Derive the request's origin dynamically (matches whatever host/proto the
  *  client used, including behind a reverse proxy). Falls back to APP_URL. */
 export function requestBaseUrl(req: Request): string {
-  const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
-  if (!host) return appUrl().replace(/\/$/, "");
+  // Behind chained proxies these headers are comma-separated lists
+  // ("https, http"); the first entry is the client-facing hop. Each value is
+  // also validated, so a spoofed header can't inject a scheme or a path into
+  // the URLs this builds — anything unexpected falls back to APP_URL.
+  const first = (name: string) =>
+    req.headers.get(name)?.split(",")[0].trim() || "";
+  const host = first("x-forwarded-host") || first("host");
+  if (!host || !HOST_RE.test(host)) return appUrl().replace(/\/$/, "");
+  const forwardedProto = first("x-forwarded-proto").toLowerCase();
   const proto =
-    req.headers.get("x-forwarded-proto") ||
-    (/^(localhost|127\.|0\.0\.0\.0|\[?::1)/.test(host) ? "http" : "https");
+    forwardedProto === "http" || forwardedProto === "https"
+      ? forwardedProto
+      : /^(localhost|127\.|0\.0\.0\.0|\[?::1)/.test(host)
+        ? "http"
+        : "https";
   return `${proto}://${host}`;
 }
+
+/** hostname[:port] or [ipv6][:port] — nothing else. */
+const HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
 
 /** Make a stored (relative) URL absolute against the request's own origin. */
 export function absoluteForRequest(

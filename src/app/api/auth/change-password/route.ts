@@ -4,6 +4,7 @@ import { sessions, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { createSession, getCurrentUser } from "@/lib/auth";
 import { getAdminUser, hashPassword, verifyPassword } from "@/lib/admin";
+import { bodyErrorResponse, readJsonBody } from "@/lib/json-body";
 
 /**
  * Change the admin password. Requires an authenticated session AND the current
@@ -16,9 +17,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const { currentPassword, newPassword, email } = await request.json();
+    const body = await readJsonBody<Record<string, unknown>>(request);
+    const { currentPassword, newPassword, email } = body ?? {};
 
-    if (!currentPassword || !newPassword) {
+    if (
+      !currentPassword ||
+      !newPassword ||
+      typeof currentPassword !== "string"
+    ) {
       return NextResponse.json(
         { error: "Current and new password are required" },
         { status: 400 }
@@ -76,6 +82,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ message: "Password updated" });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     console.error("Change password error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

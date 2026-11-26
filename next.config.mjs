@@ -128,11 +128,17 @@ const nextConfig = {
         //
         // Raster images, video and fonts cannot execute, so they need nothing
         // beyond the nosniff above.
-        source: "/storage/:path*.svg",
+        //
+        // The extension match is case-insensitive (".SVG", ".Svg"): `source`
+        // matching is case-sensitive, and a case-insensitive filesystem will
+        // serve "x.svg" for a request to "x.SVG". This rule REPLACES the
+        // baseline CSP above (same header key), so it must repeat
+        // `frame-ancestors 'none'`.
+        source: "/storage/:path(.*\\.[sS][vV][gG])",
         headers: [
           {
             key: "Content-Security-Policy",
-            value: "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            value: "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; sandbox",
           },
         ],
       },

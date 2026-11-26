@@ -247,7 +247,7 @@ console.log("1. applyModifications\n");
 
 // 1.13 Shape — fill override
 {
-  const { modifiedJson, warnings } = applyModifications(testDesign, [
+  const { modifiedJson } = applyModifications(testDesign, [
     { name: "dot", fill: "#00ff00", opacity: 0.5 },
   ]);
   assertEqual(modifiedJson.objects[4].fill, "#00ff00", "Shape fill changed");
@@ -491,17 +491,25 @@ import { renderRequestSchema, batchRequestSchema } from "../../src/lib/validatio
 // =============================================================
 console.log("\n5. API Key generation\n");
 
-import { generateApiKey, verifyApiKey, extractPrefix } from "../../src/lib/api-keys";
+import { generateApiKey, verifyApiKey, extractPrefix, isLegacyApiKeyHash, hashApiKey } from "../../src/lib/api-keys";
+import bcryptForLegacyKeys from "bcryptjs";
 
-// Async: verifyApiKey now hands bcrypt to the thread pool instead of blocking.
+// Async: legacy bcrypt verification is asynchronous.
 async function apiKeyTests() {
   const { fullKey, prefix, hash } = generateApiKey();
   assert(fullKey.startsWith("sk_live_"), `Key starts with sk_live_: ${fullKey.substring(0, 20)}...`);
   assert(fullKey.length > 30, "Key has sufficient length");
   assert(prefix.length === 12, `Prefix is 12 chars: ${prefix}`);
   assert(prefix === fullKey.substring(0, 12), "Prefix matches key start");
-  assert(hash.startsWith("$2"), "Hash is bcrypt");
+  assert(hash.startsWith("sha256:"), "New keys are hashed with SHA-256");
+  assert(!isLegacyApiKeyHash(hash), "A SHA-256 hash is not legacy");
+  assertEqual(hashApiKey(fullKey), hash, "hashApiKey reproduces the stored hash");
   assert(await verifyApiKey(fullKey, hash), "Key verifies against its hash");
+  // Keys issued before the switch carry a bcrypt hash and must keep working.
+  const legacyHash = bcryptForLegacyKeys.hashSync(fullKey, 4);
+  assert(isLegacyApiKeyHash(legacyHash), "A bcrypt hash is legacy");
+  assert(await verifyApiKey(fullKey, legacyHash), "Legacy bcrypt key still verifies");
+  assert(!(await verifyApiKey("sk_live_wrong_key_here_bad", legacyHash)), "Wrong key does NOT verify against a legacy hash");
   assert(
     !(await verifyApiKey("sk_live_wrong_key_here_bad", hash)),
     "Wrong key does NOT verify"

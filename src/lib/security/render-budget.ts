@@ -1,6 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { config } from "@/lib/config";
 
+/** Thrown when a gate's waiting list is full — before `fn` ever starts. */
+export class RenderCapacityError extends Error {
+  constructor() {
+    super("Render capacity is full; retry later");
+    this.name = "RenderCapacityError";
+  }
+}
+
 /** Count whole pipelines, including downloads, not just open browser pages. */
 export class BoundedGate {
   private active = 0;
@@ -8,7 +16,7 @@ export class BoundedGate {
   constructor(private readonly limit: number, private readonly backlog: number) {}
   async run<T>(fn: () => Promise<T>): Promise<T> {
     if (this.active >= this.limit) {
-      if (this.waiting.length >= this.backlog) throw new Error("Render capacity is full; retry later");
+      if (this.waiting.length >= this.backlog) throw new RenderCapacityError();
       await new Promise<void>(r => this.waiting.push(r));
     } else this.active++;
     try { return await fn(); } finally {

@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
-import { templates, templateFields } from "@/db/schema";
+import { templates } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
 import { generateId } from "@/lib/utils";
 import { generateThumbnail } from "@/lib/render/thumbnail";
 import { templateCreateSchema } from "@/lib/validation";
+import { bodyErrorResponse, readJsonBodyOrNull, SMALL_JSON_LIMIT } from "@/lib/json-body";
 
 export async function GET() {
   try {
@@ -65,7 +66,7 @@ export async function POST(request: Request) {
     // Validated, not destructured raw: width/height are a direct multiplier on
     // render-time memory, so an out-of-range value here is a stored DoS on
     // every later render of the template (see validation.ts).
-    const parsed = templateCreateSchema.safeParse(await request.json());
+    const parsed = templateCreateSchema.safeParse(await readJsonBodyOrNull(request, SMALL_JSON_LIMIT));
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       return NextResponse.json(
@@ -107,6 +108,8 @@ export async function POST(request: Request) {
 
     return NextResponse.json(template, { status: 201 });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     console.error("Error creating template:", error);
     return NextResponse.json(
       { error: "Internal server error" },

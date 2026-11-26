@@ -6,6 +6,19 @@ import { eq, and, isNull } from "drizzle-orm";
 import { createSession } from "@/lib/auth";
 import { getAdminUser, hashPassword, isSetupComplete } from "@/lib/admin";
 import { writeInstanceMarker } from "@/db/seed-data";
+import { clientKey, releaseAttempt, reserveAttempt } from "@/lib/rate-limit";
+import { bodyErrorResponse, readJsonBody } from "@/lib/json-body";
+
+const SETUP_PER_IP_LIMIT = { limit: 10, windowMs: 15 * 60 * 1000 };
+const SETUP_GLOBAL_LIMIT = { limit: 50, windowMs: 15 * 60 * 1000 };
+const SETUP_GLOBAL_KEY = "setup:global";
+
+function setupLockedOut(retryAfterSec: number) {
+  return NextResponse.json(
+    { error: `Too many setup attempts. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` },
+    { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+  );
+}
 
 /** Report whether the admin account has been configured. */
 export async function GET() {
@@ -27,6 +40,19 @@ export async function GET() {
  * the current password instead).
  */
 export async function POST(request: Request) {
+  // The setup token is a bearer secret on an unauthenticated endpoint; throttle
+  // guesses the same way login does (reserved synchronously, so a concurrent
+  // burst can't slip past the check).
+  const ipKey = `setup:${clientKey(request)}`;
+  const ipState = reserveAttempt(ipKey, SETUP_PER_IP_LIMIT);
+  if (!ipState.allowed) return setupLockedOut(ipState.retryAfterSec);
+  const globalState = reserveAttempt(SETUP_GLOBAL_KEY, SETUP_GLOBAL_LIMIT);
+  if (!globalState.allowed) {
+    releaseAttempt(ipKey);
+    return setupLockedOut(globalState.retryAfterSec);
+  }
+  let badToken = false;
+
   try {
     if (await isSetupComplete()) {
       return NextResponse.json(
@@ -35,8 +61,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const { email, password, setupToken } = await request.json();
+    const body = await readJsonBody<Record<string, unknown>>(request);
+    const { email, password, setupToken } = body ?? {};
     if (!bootstrapAuthorized(setupToken)) {
+      badToken = true;
       return NextResponse.json({ error: "Invalid setup token. Use CANOLITE_SETUP_TOKEN, or the one-time token printed in the server log at startup." }, { status: 403 });
     }
 
@@ -90,10 +118,17 @@ export async function POST(request: Request) {
       user: { id: admin.id, email: cleanEmail },
     });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
     console.error("Setup error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }
     );
+  } finally {
+    if (!badToken) {
+      releaseAttempt(ipKey);
+      releaseAttempt(SETUP_GLOBAL_KEY);
+    }
   }
 }

@@ -34,19 +34,16 @@ const DEFAULT_RETENTION_HOURS = 24;
  * just died". Running several replicas against one database would need this
  * scoped per instance instead.
  *
- * Deliberately does NOT touch `queued`: with an external BullMQ worker those
- * are still claimable, and in the in-process path a job is only queued for the
- * instant before rendering starts.
+ * `queued` rows are failed too. Batches render sequentially in this process,
+ * so items 2..N of an interrupted batch sit at `queued` with nothing left to
+ * pick them up — the web app never enqueues to BullMQ — and they counted
+ * against the admission cap forever, eventually locking out all renders with
+ * 429. Their completedAt makes them eligible for the retention sweep as well.
  */
 export async function failOrphanedRenders(): Promise<number> {
+  // One UPDATE ... RETURNING: no window between finding the rows and failing
+  // them.
   const orphans = await db
-    .select({ uid: renderJobs.uid })
-    .from(renderJobs)
-    .where(eq(renderJobs.status, "processing"));
-
-  if (orphans.length === 0) return 0;
-
-  await db
     .update(renderJobs)
     .set({
       status: "failed",
@@ -55,7 +52,10 @@ export async function failOrphanedRenders(): Promise<number> {
         "abandoned. Submit it again.",
       completedAt: new Date(),
     })
-    .where(eq(renderJobs.status, "processing"));
+    .where(or(eq(renderJobs.status, "processing"), eq(renderJobs.status, "queued")))
+    .returning({ uid: renderJobs.uid });
+
+  if (orphans.length === 0) return 0;
 
   console.warn(
     `[render] Marked ${orphans.length} interrupted render(s) as failed: ` +
@@ -78,7 +78,11 @@ export async function failOrphanedRenders(): Promise<number> {
  * same clock whatever the server's zone.
  */
 function cleanableWhere(retentionHours: number, projectId?: string) {
-  const cutoff = sql`now() - make_interval(hours => ${retentionHours})`;
+  // make_interval(hours => ...) takes an INTEGER; a fractional value made the
+  // whole query fail. Validation already requires whole hours — this is the
+  // backstop for any other caller.
+  const hours = Math.max(1, Math.round(Number(retentionHours) || DEFAULT_RETENTION_HOURS));
+  const cutoff = sql`now() - make_interval(hours => ${hours})`;
   const eligible = or(eq(renderJobs.status, "deleting"), and(lt(renderJobs.createdAt, cutoff), isNotNull(renderJobs.completedAt)));
   return projectId ? and(eligible, eq(renderJobs.projectId, projectId)) : eligible;
 }

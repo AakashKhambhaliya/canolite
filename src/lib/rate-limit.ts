@@ -28,6 +28,14 @@ export interface RateLimitResult {
   allowed: boolean;
   /** Seconds until the caller may try again (0 when allowed). */
   retryAfterSec: number;
+  /**
+   * reserveAttempt() only: attempts left AFTER this one. 0 means this attempt
+   * is the one that, if it fails, trips the lockout — fixed at reservation
+   * time, so concurrent attempts each learn their own position.
+   */
+  remaining?: number;
+  /** reserveAttempt() only: lockout length in seconds if this attempt trips it. */
+  lockoutSec?: number;
 }
 
 interface Bucket {
@@ -95,6 +103,43 @@ export function recordFailure(
   // guesses at the limit never gets a free slot back.
   bucket.resetAt = now + cfg.windowMs;
   return checkRateLimit(key, cfg);
+}
+
+/**
+ * Atomically check AND count an attempt against `key`.
+ *
+ * `checkRateLimit()` followed later by `recordFailure()` is a check-then-act
+ * race: every request in a concurrent burst passes the check before any of
+ * them records a failure. This runs synchronously (no await between the read
+ * and the write), so in a single Node process each caller sees the previous
+ * caller's reservation. Hand the slot back with `releaseAttempt()` when the
+ * attempt turns out not to count (e.g. it succeeded, or was malformed).
+ */
+export function reserveAttempt(
+  key: string,
+  cfg: RateLimitConfig
+): RateLimitResult {
+  const now = Date.now();
+  const state = checkRateLimit(key, cfg);
+  if (!state.allowed) return state;
+  if (buckets.size > MAX_BUCKETS) sweep(now);
+  const bucket = getBucket(key, now);
+  bucket.failures += 1;
+  bucket.resetAt = now + cfg.windowMs;
+  return {
+    allowed: true,
+    retryAfterSec: 0,
+    remaining: cfg.limit - bucket.failures,
+    lockoutSec: Math.ceil(cfg.windowMs / 1000),
+  };
+}
+
+/** Return a slot taken by `reserveAttempt()` that should not count. */
+export function releaseAttempt(key: string): void {
+  const bucket = buckets.get(key);
+  if (!bucket) return;
+  bucket.failures = Math.max(0, bucket.failures - 1);
+  if (bucket.failures === 0) buckets.delete(key);
 }
 
 /** Clear a key's failures (call after a successful authentication). */

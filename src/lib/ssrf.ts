@@ -102,3 +102,75 @@ export async function fetchPublic(raw: string, opts: Options) {
   }
   throw new Error("Too many remote redirects");
 }
+
+/** Thrown when one request references more distinct hosts than allowed. */
+export class TooManyHostsError extends Error {
+  constructor(readonly limit: number) {
+    super(`Request references more than ${limit} distinct external hosts`);
+    this.name = "TooManyHostsError";
+  }
+}
+
+/**
+ * A per-request URL safety checker for validating MANY user-supplied URLs.
+ *
+ * Calling isUrlSafe() in a loop meant up to 500 items x 256 modifications x 2
+ * URLs of sequential 5-second DNS lookups on libuv's small thread pool: a
+ * slow hostname could hang the handler for hours and starve DNS/file I/O for
+ * the whole server. This checker resolves each distinct host ONCE, with
+ * bounded concurrency, a cap on distinct hosts, and one overall deadline after
+ * which unresolved hosts count as unsafe.
+ *
+ * This is an early warning only. The actual fetch re-resolves and pins the
+ * address (publicTarget/fetchPublic), so caching per host here is safe.
+ */
+export function createUrlSafetyChecker(opts: { maxHosts?: number; concurrency?: number; deadlineMs?: number } = {}) {
+  const maxHosts = opts.maxHosts ?? 64;
+  const concurrency = Math.max(1, opts.concurrency ?? 8);
+  const deadline = AbortSignal.timeout(opts.deadlineMs ?? 20_000);
+  const byHost = new Map<string, Promise<boolean>>();
+  let active = 0;
+  const waiting: Array<() => void> = [];
+
+  const run = async (fn: () => Promise<boolean>): Promise<boolean> => {
+    if (active >= concurrency) await new Promise<void>((resolve) => waiting.push(resolve));
+    else active++;
+    try {
+      return await fn();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+
+  return function check(raw: string): Promise<boolean> {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return Promise.resolve(false);
+    }
+    // Per-URL properties publicTarget would reject, checked before the
+    // per-host cache so they can't ride on another URL's result.
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) return Promise.resolve(false);
+    const key = `${url.protocol}//${url.hostname}`;
+    let pending = byHost.get(key);
+    if (!pending) {
+      if (byHost.size >= maxHosts) return Promise.reject(new TooManyHostsError(maxHosts));
+      pending = run(async () => {
+        if (deadline.aborted) return false;
+        try {
+          await publicTarget(new URL(`${key}/`), AbortSignal.any([AbortSignal.timeout(5000), deadline]));
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      byHost.set(key, pending);
+    }
+    return pending;
+  };
+}
+
+export type UrlSafetyChecker = ReturnType<typeof createUrlSafetyChecker>;

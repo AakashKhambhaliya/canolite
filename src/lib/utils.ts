@@ -87,3 +87,14 @@ export function copyToClipboard(text: string): Promise<void> {
   }
   return Promise.resolve();
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True for a canonical UUID string. Check route params before binding them to a
+ * Postgres `uuid` column: anything else makes the query itself fail (22P02),
+ * which surfaced as a 500 instead of a plain 404.
+ */
+export function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_RE.test(value);
+}

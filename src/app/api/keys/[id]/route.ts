@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isUuid } from "@/lib/utils";
 import { db } from "@/db";
 import { apiKeys } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
@@ -10,6 +11,9 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
+    if (!isUuid(id)) {
+      return NextResponse.json({ error: "Key not found" }, { status: 404 });
+    }
     const user = await getCurrentUser();
     if (!user) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });

@@ -72,13 +72,16 @@ const POLL_TIMEOUT_MS = 20 * 60 * 1000;
  */
 async function pollRenderJob(
   uid: string,
-  onProgress: (progress: number) => void
+  onProgress: (progress: number) => void,
+  signal?: AbortSignal
 ): Promise<{ url: string; isVideo: boolean }> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   onProgress(0);
 
   while (Date.now() < deadline) {
-    const res = await fetch(`/api/renders/${uid}`, { cache: "no-store" });
+    // Stop when the page unmounts instead of polling for up to 20 minutes.
+    signal?.throwIfAborted();
+    const res = await fetch(`/api/renders/${uid}`, { cache: "no-store", signal });
     if (!res.ok) {
       throw new Error("Lost track of the render job");
     }
@@ -95,10 +98,28 @@ async function pollRenderJob(
     }
 
     onProgress(job.progress ?? 0);
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, POLL_INTERVAL_MS);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        },
+        { once: true }
+      );
+    });
   }
 
   throw new Error("Timed out waiting for the render to finish");
+}
+
+/** The modification a field value becomes, by template field type. */
+function fieldModification(name: string, type: string | undefined, value: string) {
+  if (type === "image") return { name, image_url: value };
+  if (type === "video") return { name, video_url: value };
+  if (type === "shape") return { name, fill: value };
+  return { name, text: value };
 }
 
 export function PlaygroundContent() {
@@ -222,6 +243,8 @@ export function PlaygroundContent() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [lastRenderMs, setLastRenderMs] = useState<number | null>(null);
   const startedAtRef = useRef<number | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const latestResultRef = useRef<string | null>(null);
 
   // Generate mutation
   const generateMutation = useMutation({
@@ -232,13 +255,7 @@ export function PlaygroundContent() {
           const field = templateData?.fields?.find(
             (f: any) => f.name === name
           );
-          if (field?.type === "image") {
-            return { name, image_url: value };
-          }
-          if (field?.type === "shape") {
-            return { name, fill: value };
-          }
-          return { name, text: value };
+          return fieldModification(name, field?.type, value);
         });
 
       const res = await fetch("/api/render", {
@@ -271,7 +288,10 @@ export function PlaygroundContent() {
       // has to be polled for. Treating that 202 as a finished render is why
       // choosing MP4 here produced nothing at all.
       if (res.status === 202 && data.uid) {
-        return pollRenderJob(data.uid, setVideoProgress);
+        pollAbortRef.current?.abort();
+        const controller = new AbortController();
+        pollAbortRef.current = controller;
+        return pollRenderJob(data.uid, setVideoProgress, controller.signal);
       }
 
       // A synchronous render can still have failed — the route reports that in
@@ -295,11 +315,18 @@ export function PlaygroundContent() {
       setResultIsVideo(isVideo);
       setVideoProgress(null);
       setImageSize(null);
-      // Fetch actual file size
+      // File size from the headers only: downloading the whole file (an MP4
+      // can be ~100 MB) just to read its length was wasteful. The ref check
+      // drops an answer that arrives after a newer render replaced this one.
+      latestResultRef.current = url;
       if (url) {
-        fetch(url)
-          .then((r) => r.blob())
-          .then((blob) => setImageSize(blob.size))
+        fetch(url, { method: "HEAD" })
+          .then((r) => {
+            const length = Number(r.headers.get("content-length"));
+            if (r.ok && Number.isFinite(length) && length > 0 && latestResultRef.current === url) {
+              setImageSize(length);
+            }
+          })
           .catch(() => {});
       }
       // This render is now part of the history the estimates are built from.
@@ -313,9 +340,14 @@ export function PlaygroundContent() {
     onError: (err: Error) => {
       setVideoProgress(null);
       startedAtRef.current = null;
+      // Unmounted mid-poll: nobody is looking, so no toast.
+      if (err?.name === "AbortError") return;
       toast.error(err.message || "Failed to generate");
     },
   });
+
+  // Cancel an in-flight video poll when the page unmounts.
+  useEffect(() => () => pollAbortRef.current?.abort(), []);
 
   // Tick the elapsed-time readout while a render is in flight.
   useEffect(() => {
@@ -331,9 +363,7 @@ export function PlaygroundContent() {
     .filter(([_, v]) => v)
     .map(([name, value]) => {
       const field = templateData?.fields?.find((f: any) => f.name === name);
-      if (field?.type === "image") return { name, image_url: value };
-      if (field?.type === "shape") return { name, fill: value };
-      return { name, text: value };
+      return fieldModification(name, field?.type, value);
     });
 
   // MP4 is a different endpoint with a different body — /v1/images rejects
@@ -467,7 +497,9 @@ export function PlaygroundContent() {
                         placeholder={
                           field.type === "image"
                             ? "https://example.com/image.png"
-                            : field.defaultValue || "Enter value..."
+                            : field.type === "video"
+                              ? "https://example.com/video.mp4"
+                              : field.defaultValue || "Enter value..."
                         }
                       />
                     )}
@@ -674,6 +706,8 @@ export function PlaygroundContent() {
                       onClick={async () => {
                         try {
                           const res = await fetch(generatedImage);
+                          // Never save an error page as generated.png/.mp4.
+                          if (!res.ok) throw new Error("Download failed");
                           const blob = await res.blob();
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement("a");
@@ -682,7 +716,9 @@ export function PlaygroundContent() {
                           document.body.appendChild(a);
                           a.click();
                           a.remove();
-                          URL.revokeObjectURL(url);
+                          // Revoking synchronously can cancel the download
+                          // before the browser has started it (Safari/Firefox).
+                          setTimeout(() => URL.revokeObjectURL(url), 1500);
                         } catch {
                           toast.error("Download failed");
                         }

@@ -23,7 +23,6 @@
 export const IMAGE_FORMATS = ["png", "jpg", "webp"] as const;
 export const OUTPUT_FORMATS = [...IMAGE_FORMATS, "mp4"] as const;
 
-export type ImageFormat = (typeof IMAGE_FORMATS)[number];
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 export const VIDEO_QUALITY_PRESETS = ["high", "balanced", "small"] as const;

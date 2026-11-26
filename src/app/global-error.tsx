@@ -24,8 +24,14 @@ export default function GlobalError({
   useEffect(() => {
     if (!isChunkError) return;
     const KEY = "canolite-chunk-reloaded";
-    if (sessionStorage.getItem(KEY)) return;
-    sessionStorage.setItem(KEY, "1");
+    // sessionStorage can throw (storage blocked, sandboxed frames). Without a
+    // working guard a reload could loop forever, so don't reload at all then.
+    try {
+      if (sessionStorage.getItem(KEY)) return;
+      sessionStorage.setItem(KEY, "1");
+    } catch {
+      return;
+    }
     window.location.reload();
   }, [isChunkError]);
 

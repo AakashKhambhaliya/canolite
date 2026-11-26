@@ -4,7 +4,7 @@ import { db } from "@/db";
 import { renderJobs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { getCurrentUser } from "@/lib/auth";
-import { createRenderJob, createVideoRenderJob } from "@/lib/render/create-job";
+import { createRenderJob, createVideoRenderJob, effectiveFormat } from "@/lib/render/create-job";
 import { processRenderJob } from "@/lib/render/process-job";
 import { processVideoJob } from "@/lib/render/process-video-job";
 
@@ -28,7 +28,14 @@ export async function POST(request: Request) {
       );
     }
 
-    if (format === "mp4") {
+    // Branch on the format the render will really use (request, else the
+    // template's / project's default) — not just the raw request field.
+    const resolvedFormat = await effectiveFormat(user.projectId, template_id, format);
+    if (!resolvedFormat) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 });
+    }
+
+    if (resolvedFormat === "mp4") {
       const created = await createVideoRenderJob({
         projectId: user.projectId,
         templateId: template_id,

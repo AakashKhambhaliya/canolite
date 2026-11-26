@@ -157,8 +157,13 @@ export function loopCacheRejectionReason(
   fps: number,
   outputScale: number
 ): string | null {
+  // The budget is for the whole render: every looping layer's cache is alive
+  // at once inside one ffmpeg process, so the sizes are SUMMED. Checking each
+  // layer alone let 32 layers each just under budget through.
+  let totalBytes = 0;
+  const budgetBytes = config.VIDEO_FFMPEG_LOOP_MEMORY_MB * 1024 * 1024;
   for (const layer of layers) {
-    if (!layer.loop) continue;
+    if (!layer.loop || layer.hidden) continue;
     const span = Math.max(0, layer.trimEnd - layer.trimStart);
     if (span <= 0) continue; // dead layer — never rendered by either path
 
@@ -176,10 +181,13 @@ export function loopCacheRejectionReason(
     const frames = Math.ceil(span * fps);
     const w = Math.max(1, Math.round(layer.boxW * outputScale));
     const h = Math.max(1, Math.round(layer.boxH * outputScale));
-    // The loop filter caches decoded frames in memory (RGB-ish worst case ×3).
-    const bytes = frames * w * h * 3;
-    if (bytes > config.VIDEO_FFMPEG_LOOP_MEMORY_MB * 1024 * 1024) {
-      return `${layer.name}: a looping layer exceeds VIDEO_FFMPEG_LOOP_MEMORY_MB`;
+    // The loop filter caches decoded frames in memory: RGBA (4 bytes/px)
+    // when the chain converts for opacity or contain-padding, otherwise the
+    // RGB-ish worst case of 3.
+    const rgba = layer.fit === "contain" || (layer.opacity ?? 1) < 1 - 1e-6;
+    totalBytes += frames * w * h * (rgba ? 4 : 3);
+    if (totalBytes > budgetBytes) {
+      return `${layer.name}: looping layers together exceed VIDEO_FFMPEG_LOOP_MEMORY_MB`;
     }
   }
   return null;

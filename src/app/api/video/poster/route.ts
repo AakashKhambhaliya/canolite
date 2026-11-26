@@ -7,8 +7,9 @@ import { db } from "@/db";
 import { assets } from "@/db/schema";
 import { getCurrentUser } from "@/lib/auth";
 import { storageFilePath, uploadFile } from "@/lib/storage";
-import { extractPoster } from "@/lib/video/poster";
-import { generateId } from "@/lib/utils";
+import { extractPoster, PosterUnavailableError } from "@/lib/video/poster";
+import { bodyErrorResponse, readJsonBody } from "@/lib/json-body";
+import { RenderCapacityError, withRenderSlot } from "@/lib/security/render-budget";
 
 function keyFromStorageUrl(url: string): string | null {
   const match = url.match(/^\/storage\/(.+)$/);
@@ -24,9 +25,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const body = await request.json();
-    const assetId = String(body.assetId || "");
-    const atSec = Number(body.atSec || 0);
+    const body = await readJsonBody<{ assetId?: unknown; atSec?: unknown }>(request);
+    const assetId = String(body?.assetId || "");
+    const atSec = Number(body?.atSec || 0);
     if (!assetId) {
       return NextResponse.json({ error: "assetId is required" }, { status: 400 });
     }
@@ -63,13 +64,26 @@ export async function POST(request: Request) {
 
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "canolite-poster-"));
     const outPath = path.join(tempDir, "poster.jpg");
-    await extractPoster(storageFilePath(sourceKey), atSec, outPath);
+    // An ffmpeg spawn per request: count it against the video render budget
+    // like every other ffmpeg job, instead of running unbounded.
+    await withRenderSlot(() => extractPoster(storageFilePath(sourceKey), atSec, outPath), "video");
 
-    const posterKey = `${sourceKey}.poster.${generateId()}.jpg`;
+    // Deterministic per (asset, timestamp): repeat requests overwrite one file
+    // instead of piling up a new untracked file each time. Same timestamp,
+    // same bytes, so the immutable public caching of /storage stays correct.
+    const posterKey = `${sourceKey}.poster.at-${Math.round(atSec * 1000)}.jpg`;
     const posterUrl = await uploadFile(posterKey, await fs.readFile(outPath), "image/jpeg");
 
     return NextResponse.json({ posterUrl });
   } catch (error) {
+    const bodyResponse = bodyErrorResponse(error);
+    if (bodyResponse) return bodyResponse;
+    if (error instanceof PosterUnavailableError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    if (error instanceof RenderCapacityError) {
+      return NextResponse.json({ error: error.message }, { status: 429, headers: { "Retry-After": "10" } });
+    }
     console.error("Video poster error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   } finally {

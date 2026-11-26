@@ -10,7 +10,6 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Card,
-  CardContent,
 } from "@/components/ui/card";
 import {
   Dialog,
@@ -49,7 +48,7 @@ import {
   FileImage,
   Video,
 } from "lucide-react";
-import { cn, formatRelativeTime, copyToClipboard } from "@/lib/utils";
+import { formatRelativeTime, copyToClipboard } from "@/lib/utils";
 import { Label } from "@/components/ui/label";
 
 const CANVAS_PRESETS = [
@@ -80,7 +79,6 @@ export default function TemplatesPage() {
   const [customWidth, setCustomWidth] = useState(1080);
   const [customHeight, setCustomHeight] = useState(1350);
   const [newName, setNewName] = useState("Untitled Template");
-  const [isCreating, setIsCreating] = useState(false);
 
   const { data: templates, isLoading } = useQuery({
     queryKey: ["templates"],

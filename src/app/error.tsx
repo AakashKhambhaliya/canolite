@@ -26,8 +26,14 @@ export default function Error({
     // Reload once into the fresh build. Guard against an infinite loop if the
     // new build is also broken.
     const KEY = "canolite-chunk-reloaded";
-    if (sessionStorage.getItem(KEY)) return;
-    sessionStorage.setItem(KEY, "1");
+    // sessionStorage can throw (storage blocked, sandboxed frames). Without a
+    // working guard a reload could loop forever, so don't reload at all then.
+    try {
+      if (sessionStorage.getItem(KEY)) return;
+      sessionStorage.setItem(KEY, "1");
+    } catch {
+      return;
+    }
     window.location.reload();
   }, [isChunkError]);
 

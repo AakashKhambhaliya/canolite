@@ -1,12 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import {
-  estimateRenderMs,
-  type EstimateInput,
-  type RenderTimeEstimate,
-  type RenderTimeStats,
-} from "@/lib/render-time";
+import type { RenderTimeStats } from "@/lib/render-time";
 
 /**
  * Measured render times for this project, used for the "Est. time" readouts.
@@ -25,13 +20,4 @@ export function useRenderStats() {
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
-}
-
-/** Convenience: the stats plus an estimate for one specific pending render. */
-export function useRenderEstimate(input: EstimateInput): {
-  estimate: RenderTimeEstimate;
-  stats: RenderTimeStats | undefined;
-} {
-  const { data } = useRenderStats();
-  return { estimate: estimateRenderMs(data, input), stats: data };
 }

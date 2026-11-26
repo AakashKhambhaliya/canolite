@@ -18,6 +18,15 @@ export const dynamic = "force-dynamic";
  * zips all completed renders. Used by the "Download ZIP" button.
  */
 export async function GET(request: Request) {
+  try {
+    return await buildDownload(request);
+  } catch (error) {
+    console.error("[download] failed:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
+
+async function buildDownload(request: Request) {
   const user = await getCurrentUser();
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -78,7 +87,12 @@ export async function GET(request: Request) {
     archive.destroy();
   });
   for (const f of files) archive.file(f.path, { name: f.name });
-  void archive.finalize();
+  // A file removed by cleanup between the access() check above and the read
+  // rejects finalize(); unhandled, that rejection would crash the process.
+  archive.finalize().catch((err) => {
+    console.error("[download] zip finalize failed:", err);
+    archive.destroy();
+  });
 
   const filename = batch ? `canolite-batch-${batch}.zip` : "canolite-renders.zip";
   return new Response(Readable.toWeb(archive) as ReadableStream, {

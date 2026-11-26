@@ -182,24 +182,31 @@ function ImageSize({
     sy = Math.abs(o.scaleY ?? 1);
   // Keep any flip (negative scale) when changing the size.
   const sign = (s: number | undefined) => ((s ?? 1) < 0 ? -1 : 1);
+  // With the aspect lock on, the other axis keeps the current ratio. A zero
+  // scale has no ratio to keep (dividing by it wrote Infinity/NaN into the
+  // design), so fall back to a uniform scale.
   const setWidth = (w: number) => {
+    if (!Number.isFinite(w) || w <= 0) return;
     const nx = w / baseW;
+    const ny = sx > 0 ? (nx * sy) / sx : nx;
     up(
       locked
         ? {
             scaleX: nx * sign(o.scaleX),
-            scaleY: (nx * sy * sign(o.scaleY)) / sx,
+            scaleY: ny * sign(o.scaleY),
           }
         : { scaleX: nx * sign(o.scaleX) },
     );
   };
   const setHeight = (h: number) => {
+    if (!Number.isFinite(h) || h <= 0) return;
     const ny = h / baseH;
+    const nx = sy > 0 ? (ny * sx) / sy : ny;
     up(
       locked
         ? {
             scaleY: ny * sign(o.scaleY),
-            scaleX: (ny * sx * sign(o.scaleX)) / sy,
+            scaleX: nx * sign(o.scaleX),
           }
         : { scaleY: ny * sign(o.scaleY) },
     );

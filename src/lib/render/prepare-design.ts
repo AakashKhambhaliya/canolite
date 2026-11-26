@@ -17,10 +17,24 @@ import { eq, and } from "drizzle-orm";
 import { inlineExternalImages } from "./inline-images";
 import { inlineFontSources } from "./inline-fonts";
 import { collectFamilies, type CustomFontRef } from "./render-image";
+import { fontsWithCustom } from "./apply-modifications";
 
 export interface PreparedDesign {
   designJson: any;
   customFonts: CustomFontRef[];
+}
+
+/**
+ * Font families a render for this project can use: the default render fonts
+ * plus the project's uploaded fonts (family = file name without extension,
+ * the same rule prepareDesignForRender uses to load them).
+ */
+export async function availableFontsForProject(projectId: string): Promise<Set<string>> {
+  const fontAssets = await db
+    .select({ name: assets.name })
+    .from(assets)
+    .where(and(eq(assets.projectId, projectId), eq(assets.type, "font")));
+  return fontsWithCustom(fontAssets.map((a: any) => String(a.name).replace(/\.[^.]+$/, "")));
 }
 
 export async function prepareDesignForRender(

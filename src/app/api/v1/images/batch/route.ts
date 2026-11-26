@@ -3,9 +3,9 @@ import { NextResponse } from "next/server";
 import { authenticateApiKey } from "@/lib/api-auth";
 import { withCors, handleOptions } from "@/lib/cors";
 import { batchRequestSchema } from "@/lib/validation";
-import { createBatchJobs } from "@/lib/render/create-job";
+import { createBatchJobs, effectiveFormat } from "@/lib/render/create-job";
 import { processBatch } from "@/lib/render/process-job";
-import { isUrlSafe } from "@/lib/ssrf";
+import { createUrlSafetyChecker, TooManyHostsError } from "@/lib/ssrf";
 
 export async function OPTIONS() {
   return handleOptions();
@@ -34,7 +34,11 @@ export async function POST(request: Request) {
 
     const { template_id, items, format, quality, scale } = parsed.data;
 
-    if (format === "mp4") {
+    const resolvedFormat = await effectiveFormat(auth.projectId, template_id, format);
+    if (!resolvedFormat) {
+      return withCors(NextResponse.json({ error: "Template not found" }, { status: 404 }));
+    }
+    if (resolvedFormat === "mp4") {
       return withCors(
         NextResponse.json(
           { error: "MP4 renders are asynchronous video jobs. Use POST /v1/videos/batch." },
@@ -43,16 +47,25 @@ export async function POST(request: Request) {
       );
     }
 
-    // SSRF guard for per-item webhooks.
-    for (const item of items) {
-      if (item.webhook_url && !(await isUrlSafe(item.webhook_url))) {
-        return withCors(
-          NextResponse.json(
-            { error: "webhook_url must be a public http(s) URL" },
-            { status: 400 }
-          )
-        );
+    // SSRF guard for per-item webhooks: one bounded, deduplicated check per
+    // distinct host rather than up to 500 sequential DNS lookups.
+    const check = createUrlSafetyChecker();
+    let webhooksOk: boolean[];
+    try {
+      webhooksOk = await Promise.all(items.map((item) => (item.webhook_url ? check(item.webhook_url) : true)));
+    } catch (error) {
+      if (error instanceof TooManyHostsError) {
+        return withCors(NextResponse.json({ error: error.message }, { status: 400 }));
       }
+      throw error;
+    }
+    if (webhooksOk.includes(false)) {
+      return withCors(
+        NextResponse.json(
+          { error: "webhook_url must be a public http(s) URL" },
+          { status: 400 }
+        )
+      );
     }
 
     const created = await createBatchJobs({

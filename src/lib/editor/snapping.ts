@@ -43,8 +43,9 @@ export function installSnapping(canvas: any): () => void {
   function bounds(obj: any) {
     const l = obj.left || 0;
     const t = obj.top || 0;
-    const w = (obj.width || 0) * (obj.scaleX || 1);
-    const h = (obj.height || 0) * (obj.scaleY || 1);
+    // ?? not ||: a scale of 0 is a real (degenerate) size, not "unset".
+    const w = (obj.width || 0) * (obj.scaleX ?? 1);
+    const h = (obj.height || 0) * (obj.scaleY ?? 1);
     return {
       left: l,
       right: l + w,
@@ -117,7 +118,12 @@ export function installSnapping(canvas: any): () => void {
     const b = bounds(obj);
 
     // Snap right edge
-    const snapRight = bestSnap([b.right], xTargets, t);
+    let snapRight = bestSnap([b.right], xTargets, t);
+    // A snap that would collapse the object to (or past) zero size is
+    // ignored: it wrote scaleX/scaleY <= 0, which later divided by zero in
+    // the inspector and serialized NaN/Infinity into the design.
+    const MIN_SNAP_SIZE = 1;
+    if (snapRight && snapRight.pos - b.left < MIN_SNAP_SIZE) snapRight = null;
     if (snapRight) {
       const newW = snapRight.pos - b.left;
       obj.scaleX = newW / (obj.width || 1);
@@ -125,7 +131,8 @@ export function installSnapping(canvas: any): () => void {
     }
 
     // Snap bottom edge
-    const snapBottom = bestSnap([b.bottom], yTargets, t);
+    let snapBottom = bestSnap([b.bottom], yTargets, t);
+    if (snapBottom && snapBottom.pos - b.top < MIN_SNAP_SIZE) snapBottom = null;
     if (snapBottom) {
       const newH = snapBottom.pos - b.top;
       obj.scaleY = newH / (obj.height || 1);
@@ -141,7 +148,7 @@ export function installSnapping(canvas: any): () => void {
     // without the edge actually reaching it, unlike the right/bottom
     // handles — the object never physically got there.
     const snapLeft = bestSnap([b.left], xTargets, t);
-    if (snapLeft && !snapRight) {
+    if (snapLeft && !snapRight && b.right - snapLeft.pos >= MIN_SNAP_SIZE) {
       const newW = b.right - snapLeft.pos;
       obj.scaleX = newW / (obj.width || 1);
       obj.left = snapLeft.pos;
@@ -150,7 +157,7 @@ export function installSnapping(canvas: any): () => void {
 
     // Snap top edge (when dragging from top handle) — same reasoning as left.
     const snapTop = bestSnap([b.top], yTargets, t);
-    if (snapTop && !snapBottom) {
+    if (snapTop && !snapBottom && b.bottom - snapTop.pos >= MIN_SNAP_SIZE) {
       const newH = b.bottom - snapTop.pos;
       obj.scaleY = newH / (obj.height || 1);
       obj.top = snapTop.pos;

@@ -89,11 +89,3 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
     return null;
   }
 }
-
-export async function requireAuth(): Promise<AuthUser> {
-  const user = await getCurrentUser();
-  if (!user) {
-    throw new Error("Not authenticated");
-  }
-  return user;
-}

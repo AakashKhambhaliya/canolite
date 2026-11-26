@@ -4,7 +4,6 @@ import { useMemo, useState, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -29,8 +28,6 @@ import {
   ArrowLeft,
   Check,
   Loader2,
-  AlertCircle,
-  Table,
   Zap,
   Timer,
 } from "lucide-react";
@@ -99,6 +96,31 @@ function parseCSV(text: string): string[][] {
 
 type Step = "template" | "upload" | "mapping" | "preview" | "generate";
 
+/**
+ * Field mappings store the CSV column INDEX (as a string), never the header
+ * text: headers can be blank (trailing commas, empty spreadsheet columns) or
+ * repeated. A blank header as a Select value crashed the page — Radix Select
+ * throws on value="" — and duplicates collided as React keys and resolved to
+ * the wrong column through indexOf().
+ */
+const SKIP = "__skip__";
+function mappedColumn(value: string | undefined): number {
+  if (!value || value === SKIP) return -1;
+  const idx = Number(value);
+  return Number.isInteger(idx) && idx >= 0 ? idx : -1;
+}
+function columnLabel(header: string | undefined, idx: number): string {
+  return header && header.trim() ? header : `Column ${idx + 1} (no header)`;
+}
+
+/** The modification a CSV cell becomes, by template field type. */
+function modificationFor(fieldName: string, type: string | undefined, value: string) {
+  if (type === "image") return { name: fieldName, image_url: value };
+  if (type === "video") return { name: fieldName, video_url: value };
+  if (type === "shape") return { name: fieldName, fill: value };
+  return { name: fieldName, text: value };
+}
+
 export default function BulkPage() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -166,18 +188,11 @@ export default function BulkPage() {
       const items = csvData.slice(1).map((row) => {
         const mods: any[] = [];
         for (const [fieldName, csvCol] of Object.entries(fieldMapping)) {
-          if (!csvCol || csvCol === "__skip__") continue;
-          const colIdx = csvHeaders.indexOf(csvCol);
+          const colIdx = mappedColumn(csvCol);
           if (colIdx === -1) continue;
           const field = templateData?.fields?.find((f: any) => f.name === fieldName);
           const value = row[colIdx] || "";
-          if (field?.type === "image") {
-            mods.push({ name: fieldName, image_url: value });
-          } else if (field?.type === "shape") {
-            mods.push({ name: fieldName, fill: value });
-          } else {
-            mods.push({ name: fieldName, text: value });
-          }
+          mods.push(modificationFor(fieldName, field?.type, value));
         }
         return { modifications: mods };
       });
@@ -207,10 +222,29 @@ export default function BulkPage() {
     },
   });
 
+  // A different template has different fields: mappings and output overrides
+  // chosen for the previous one must not carry over.
+  const selectTemplate = (value: string) => {
+    if (value === selectedTemplate) return;
+    setSelectedTemplate(value);
+    setFieldMapping({});
+    setOverrides({});
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    // Reset so choosing the same file again still fires onChange.
+    e.target.value = "";
+    if (file) readCsvFile(file);
+  };
 
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file) readCsvFile(file);
+  };
+
+  const readCsvFile = (file: File) => {
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
@@ -224,16 +258,14 @@ export default function BulkPage() {
         setCsvData(parsed);
 
         // Auto-map by matching header names to field names
-        if (templateData?.fields) {
-          const autoMap: Record<string, string> = {};
-          templateData.fields.forEach((field: any) => {
-            const match = parsed[0].find(
-              (h) => h.toLowerCase() === field.name.toLowerCase()
-            );
-            if (match) autoMap[field.name] = match;
-          });
-          setFieldMapping(autoMap);
-        }
+        const autoMap: Record<string, string> = {};
+        templateData?.fields?.forEach((field: any) => {
+          const idx = parsed[0].findIndex(
+            (h) => h && h.toLowerCase() === field.name.toLowerCase()
+          );
+          if (idx !== -1) autoMap[field.name] = String(idx);
+        });
+        setFieldMapping(autoMap);
 
         setStep("mapping");
       } catch (err) {
@@ -308,7 +340,7 @@ export default function BulkPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
+            <Select value={selectedTemplate} onValueChange={selectTemplate}>
               <SelectTrigger>
                 <SelectValue placeholder="Choose a template..." />
               </SelectTrigger>
@@ -323,7 +355,9 @@ export default function BulkPage() {
             <div className="flex justify-end">
               <Button
                 variant="accent"
-                disabled={!selectedTemplate}
+                // Wait for the template's fields: the CSV upload auto-maps
+                // against them, and silently mapped nothing before they loaded.
+                disabled={!selectedTemplate || !templateData}
                 onClick={() => setStep("upload")}
               >
                 Next
@@ -346,6 +380,8 @@ export default function BulkPage() {
             <div
               className="border-2 border-dashed rounded-xl p-12 text-center cursor-pointer hover:border-primary/50 hover:bg-muted/50 transition-colors"
               onClick={() => fileInputRef.current?.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={handleDrop}
             >
               <Upload className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
               <p className="font-medium mb-1">Click to upload CSV</p>
@@ -403,10 +439,10 @@ export default function BulkPage() {
                       <SelectValue placeholder="Select column..." />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__skip__">— Skip —</SelectItem>
-                      {csvHeaders.map((h) => (
-                        <SelectItem key={h} value={h}>
-                          {h}
+                      <SelectItem value={SKIP}>— Skip —</SelectItem>
+                      {csvHeaders.map((h, idx) => (
+                        <SelectItem key={idx} value={String(idx)}>
+                          {columnLabel(h, idx)}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -443,7 +479,7 @@ export default function BulkPage() {
                   <tr className="bg-muted">
                     <th className="px-3 py-2 text-left font-medium">#</th>
                     {Object.entries(fieldMapping)
-                      .filter(([_, v]) => v)
+                      .filter(([_, v]) => mappedColumn(v) !== -1)
                       .map(([field]) => (
                         <th key={field} className="px-3 py-2 text-left font-medium font-mono">
                           {field}
@@ -456,9 +492,9 @@ export default function BulkPage() {
                     <tr key={i} className="border-t">
                       <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
                       {Object.entries(fieldMapping)
-                        .filter(([_, v]) => v)
+                        .filter(([_, v]) => mappedColumn(v) !== -1)
                         .map(([field, col]) => {
-                          const colIdx = csvHeaders.indexOf(col);
+                          const colIdx = mappedColumn(col);
                           return (
                             <td key={field} className="px-3 py-2 max-w-[200px] truncate">
                               {row[colIdx] || "—"}

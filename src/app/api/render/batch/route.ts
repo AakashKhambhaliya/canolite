@@ -1,7 +1,7 @@
 import { renderBody, RenderAdmissionError } from "@/lib/render/admission";
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { createBatchJobs, createVideoBatchJobs } from "@/lib/render/create-job";
+import { createBatchJobs, createVideoBatchJobs, effectiveFormat } from "@/lib/render/create-job";
 import { processBatch } from "@/lib/render/process-job";
 import { processVideoBatch } from "@/lib/render/process-video-job";
 
@@ -37,7 +37,12 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    if (format === "mp4") {
+    const resolvedFormat = await effectiveFormat(user.projectId, template_id, format);
+    if (!resolvedFormat) {
+      return NextResponse.json({ error: "Template not found" }, { status: 404 });
+    }
+
+    if (resolvedFormat === "mp4") {
       if (items.length > 20) {
         return NextResponse.json({ error: "Maximum 20 items per video batch" }, { status: 400 });
       }
@@ -45,7 +50,8 @@ export async function POST(request: Request) {
         projectId: user.projectId,
         templateId: template_id,
         items,
-        output: { fps: body.fps, durationSec: body.duration, quality: body.videoQuality || body.qualityPreset },
+        // scale was dropped here, so a video batch always rendered at 1x.
+        output: { fps: body.fps, durationSec: body.duration, quality: body.videoQuality || body.qualityPreset, scale },
       });
       if (!created) return NextResponse.json({ error: "Template not found" }, { status: 404 });
       void processVideoBatch(created.uids);

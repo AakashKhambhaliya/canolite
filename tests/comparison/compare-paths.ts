@@ -259,7 +259,7 @@ async function main(): Promise<void> {
   const fastMs = Date.now() - t0;
   const t1 = Date.now();
   const legacy = await renderVideoWithChromium(legacyCtx);
-  const legacyMs = Date.now() - t0 - fastMs;
+  const legacyMs = Date.now() - t1;
 
   const fastMp4 = path.join(fastCtx.tmpDir, "out.mp4");
   const legacyMp4 = path.join(legacyCtx.tmpDir, "out.mp4");

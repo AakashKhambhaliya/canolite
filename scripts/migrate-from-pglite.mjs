@@ -62,7 +62,17 @@ async function main() {
     console.log(`[pglite-migrate] Migrating ${tables.length} table(s) from ./.pglite.`);
 
     await target.query("begin");
-    await target.query("set session_replication_role = replica").catch(() => undefined);
+    // Needs superuser. Inside a transaction a failed statement aborts the
+    // WHOLE transaction (every later INSERT then fails with 25P02), so it runs
+    // under a savepoint and only that savepoint is rolled back on failure.
+    await target.query("savepoint replication_role");
+    try {
+      await target.query("set local session_replication_role = replica");
+      await target.query("release savepoint replication_role");
+    } catch {
+      await target.query("rollback to savepoint replication_role");
+      console.warn("[pglite-migrate] Not a superuser; foreign-key triggers stay active during the copy.");
+    }
 
     for (const table of tables) {
       const rowsResult = await source.query(`select * from ${quoteIdent(table)}`);
@@ -78,7 +88,7 @@ async function main() {
       console.log(`[pglite-migrate] ${table}: ${rows.length} row(s)`);
     }
 
-    await target.query("set session_replication_role = origin").catch(() => undefined);
+    // SET LOCAL ends with the transaction, so there is nothing to restore.
     await target.query("commit");
     await fs.rename(oldDir, migratedDir);
     console.log("[pglite-migrate] Migration complete. Renamed ./.pglite to ./.pglite.migrated.");

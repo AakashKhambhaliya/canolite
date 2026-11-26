@@ -1360,6 +1360,9 @@ export function EditorWorkspace({
         const img = await FabricImage.fromURL(src, {
           crossOrigin: "anonymous",
         });
+        // An SVG without intrinsic dimensions loads as 0×0; dividing by that
+        // put scale: Infinity and left/top: NaN into the design.
+        if (!(img.width > 0 && img.height > 0)) throw new Error("Image has no size");
         const { width: w, height: h } = docInfo.current;
         const scale = Math.min((w * 0.46) / img.width, (h * 0.46) / img.height);
         img.set({
@@ -1429,7 +1432,7 @@ export function EditorWorkspace({
           method: "POST",
           body: formData,
         });
-        const asset = await res.json();
+        const asset = await res.json().catch(() => ({ error: `Server returned HTTP ${res.status}` }));
         if (!res.ok) throw new Error(asset?.error || "Video upload failed");
         if (!asset.posterUrl)
           throw new Error("Video upload did not return a poster frame");
@@ -1514,8 +1517,12 @@ export function EditorWorkspace({
           await activeObj.setSrc(url);
           if (fabricCanvasRef.current !== canvas || !canvas.contains(activeObj))
             return;
-          const scale = Math.min(w / activeObj.width, h / activeObj.height);
-          activeObj.set({ scaleX: scale, scaleY: scale });
+          if (activeObj.width > 0 && activeObj.height > 0) {
+            const scale = Math.min(w / activeObj.width, h / activeObj.height);
+            if (Number.isFinite(scale) && scale > 0) activeObj.set({ scaleX: scale, scaleY: scale });
+          } else {
+            toast.error("The new image has no size; its dimensions could not be fitted.");
+          }
           activeObj.setCoords();
           canvas.requestRenderAll();
           canvas.fire("object:modified", { target: activeObj });
@@ -1634,7 +1641,7 @@ export function EditorWorkspace({
             scale: exportScale,
           }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({ error: `Server returned HTTP ${res.status}` }));
         if (!res.ok)
           throw new Error(data?.error || "Failed to start MP4 export");
         if (lifetime.current?.signal.aborted) return;
@@ -1822,7 +1829,7 @@ export function EditorWorkspace({
           method: "POST",
           body: form,
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({ error: `Server returned HTTP ${res.status}` }));
         if (!res.ok) throw new Error(data.error || "Font upload failed");
         const font: CustomFont = {
           family: (data.name || file.name).replace(/\.[^.]+$/, ""),

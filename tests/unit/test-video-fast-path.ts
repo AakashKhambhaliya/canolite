@@ -244,8 +244,8 @@ console.log("\n2. filter-graph geometry and enable windows\n");
   );
   assertEqual(
     fitFilterExpr("contain", 480, 270),
-    "scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black",
-    "contain scales down then pads (identical to decode.ts)"
+    "format=rgba,scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black",
+    "contain converts to RGBA, scales down, then pads (identical to decode.ts)"
   );
   assertEqual(fitFilterExpr("stretch", 480, 270), "scale=480:270", "stretch distorts to the box");
 
@@ -333,7 +333,7 @@ const basePlan = {
 
   const fc = args[args.indexOf("-filter_complex") + 1];
   assert(
-    fc.includes("[1:v]fps=30,scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black,setpts=N/(30*TB),setpts=PTS-STARTPTS+1.5/TB[v0]"),
+    fc.includes("[1:v]fps=30,format=rgba,scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2:color=black,setpts=N/(30*TB),setpts=PTS-STARTPTS+1.5/TB[v0]"),
     "video chain: fps → exact grid re-index (decode.ts frame mapping) → contain scale+pad → setpts to startAt"
   );
   assert(
